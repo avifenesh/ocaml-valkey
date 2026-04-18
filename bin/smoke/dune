@@ -1,0 +1,4 @@
+(executable
+ (name smoke)
+ (public_name valkey-smoke)
+ (libraries valkey))

@@ -1,0 +1,4 @@
+(library
+ (name valkey)
+ (public_name valkey)
+ (libraries eio eio.unix eio_main))

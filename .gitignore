@@ -1,0 +1,50 @@
+# OCaml / Dune build artifacts
+_build/
+_opam/
+*.install
+*.merlin
+.merlin
+
+# Compiled objects
+*.cmi
+*.cmo
+*.cmx
+*.cmxa
+*.cma
+*.cmt
+*.cmti
+*.o
+*.a
+*.so
+*.annot
+
+# Dune
+.dune/
+
+# opam local switch
+_opam/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs / tmp
+*.log
+tmp/
+
+# Test artifacts
+_test/
+coverage/
+*.coverage
+
+# Session tooling artifacts (not project code)
+.remember/

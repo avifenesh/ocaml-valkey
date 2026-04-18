@@ -1,0 +1,29 @@
+# Dev-only Valkey target for the client.
+# Standalone single node on :6379. No auth, no TLS — that's client-concern territory
+# we'll exercise in dedicated compose files later.
+#
+# Usage:
+#   docker compose up -d          # start
+#   docker compose logs -f valkey # tail
+#   docker compose down           # stop & remove
+#   docker compose down -v        # stop & wipe data volume
+
+services:
+  valkey:
+    image: valkey/valkey:8
+    container_name: ocaml-valkey-dev
+    ports:
+      - "6379:6379"
+    # No volume on purpose: fresh state each `up`. Add a volume only when we
+    # deliberately want persistence tests (RDB/AOF).
+    command: >-
+      valkey-server
+      --appendonly no
+      --save ""
+      --protected-mode no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6379", "PING"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+    restart: unless-stopped
