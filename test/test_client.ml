@@ -726,6 +726,63 @@ let tests =
             | Error e -> Format.asprintf "Error %a" E.pp e));
       let _ = C.del c [ key ] in
       ());
+    Alcotest.test_case "eval_script: first EVAL, second EVALSHA, NOSCRIPT fallback" `Quick
+      (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:es" in
+      ignore (C.set c key "hi");
+      let s = C.Script.create "return redis.call('GET', KEYS[1])" in
+      (* First invocation: server hasn't seen it — EVAL path *)
+      (match C.eval_script c s ~keys:[ key ] ~args:[] with
+       | Ok (R.Bulk_string "hi") -> ()
+       | other ->
+           Alcotest.failf "eval_script 1: %s"
+             (match other with
+              | Ok v -> Format.asprintf "Ok %a" R.pp v
+              | Error e -> Format.asprintf "Error %a" E.pp e));
+      (* Second invocation: EVALSHA (same result) *)
+      (match C.eval_script c s ~keys:[ key ] ~args:[] with
+       | Ok (R.Bulk_string "hi") -> ()
+       | other -> Alcotest.failf "eval_script 2: %s"
+           (match other with
+            | Ok v -> Format.asprintf "Ok %a" R.pp v
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      (* Force server flush via raw command so OUR cache stays stale *)
+      ignore (C.exec c [| "SCRIPT"; "FLUSH" |]);
+      (* Next eval_script: our cache thinks loaded, but server doesn't.
+         EVALSHA returns NOSCRIPT, fallback to EVAL. *)
+      (match C.eval_script c s ~keys:[ key ] ~args:[] with
+       | Ok (R.Bulk_string "hi") -> ()
+       | other -> Alcotest.failf "eval_script after flush: %s"
+           (match other with
+            | Ok v -> Format.asprintf "Ok %a" R.pp v
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      (* Typed script_flush also clears our cache *)
+      ignore (C.script_flush c);
+      (match C.eval_script c s ~keys:[ key ] ~args:[] with
+       | Ok (R.Bulk_string "hi") -> ()
+       | other -> Alcotest.failf "eval_script after typed flush: %s"
+           (match other with
+            | Ok v -> Format.asprintf "Ok %a" R.pp v
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "eval_cached (one-shot)" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:ec" in
+      ignore (C.set c key "42");
+      (match
+         C.eval_cached c
+           ~script:"return redis.call('GET', KEYS[1])"
+           ~keys:[ key ] ~args:[]
+       with
+       | Ok (R.Bulk_string "42") -> ()
+       | other -> Alcotest.failf "eval_cached: %s"
+           (match other with
+            | Ok v -> Format.asprintf "Ok %a" R.pp v
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      let _ = C.del c [ key ] in
+      ());
     Alcotest.test_case "HINCRBY" `Quick (fun () ->
       with_client @@ fun c ->
       let key = "ocaml:c:h4" in

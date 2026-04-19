@@ -422,6 +422,33 @@ val script_flush :
   ?mode:script_flush_mode ->
   t -> (unit, Connection.Error.t) result
 
+module Script : sig
+  type t
+  val create : string -> t
+  (** Pre-computes the script's SHA1 at construction so subsequent
+      executions can skip the hash. *)
+
+  val source : t -> string
+  val sha : t -> string
+end
+
+val eval_script :
+  ?timeout:float ->
+  t -> Script.t -> keys:string list -> args:string list ->
+  (Resp3.t, Connection.Error.t) result
+(** Optimistic EVALSHA; on the first ever use (or after server-side
+    script flush), transparently falls back to EVAL. The client tracks
+    which SHAs this server is known to have loaded so callers don't
+    juggle NOSCRIPT handling. *)
+
+val eval_cached :
+  ?timeout:float ->
+  t -> script:string -> keys:string list -> args:string list ->
+  (Resp3.t, Connection.Error.t) result
+(** Convenience wrapper over [eval_script]. Wraps [script] in a
+    fresh [Script.t] each call; prefer [eval_script] when running the
+    same script many times (saves repeated SHA1 computation). *)
+
 (** {1 Iteration} *)
 
 type scan_page = {

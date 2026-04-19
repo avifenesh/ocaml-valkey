@@ -34,6 +34,8 @@ end
 type t = {
   connection : Connection.t;
   config : Config.t;
+  loaded_shas : (string, unit) Hashtbl.t;
+  loaded_shas_mutex : Eio.Mutex.t;
 }
 [@@warning "-69"]
 
@@ -42,7 +44,9 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port (
     Connection.connect ~sw ~net ~clock ?domain_mgr
       ~config:config.connection ~host ~port ()
   in
-  { connection; config }
+  { connection; config;
+    loaded_shas = Hashtbl.create 16;
+    loaded_shas_mutex = Eio.Mutex.create () }
 
 let close t = Connection.close t.connection
 
@@ -658,10 +662,65 @@ let script_flush ?timeout ?mode t =
     | Some Flush_async -> [ "ASYNC" ]
   in
   let args = Array.of_list ([ "SCRIPT"; "FLUSH" ] @ tail) in
-  match exec ?timeout t args with
-  | Error e -> Error e
-  | Ok (Resp3.Simple_string "OK") -> Ok ()
-  | Ok v -> Error (protocol_violation "SCRIPT FLUSH" v)
+  let result =
+    match exec ?timeout t args with
+    | Error e -> Error e
+    | Ok (Resp3.Simple_string "OK") -> Ok ()
+    | Ok v -> Error (protocol_violation "SCRIPT FLUSH" v)
+  in
+  (* SCRIPT FLUSH invalidates everything the server has loaded. Clear our
+     view so future eval_script calls fall back to EVAL correctly. *)
+  (match result with
+   | Ok () ->
+       Eio.Mutex.use_rw ~protect:true t.loaded_shas_mutex (fun () ->
+           Hashtbl.clear t.loaded_shas)
+   | Error _ -> ());
+  result
+
+module Script = struct
+  type t = { source : string; sha : string }
+
+  let create source =
+    let sha =
+      Digestif.SHA1.digest_string source |> Digestif.SHA1.to_hex
+    in
+    { source; sha }
+
+  let source t = t.source
+  let sha t = t.sha
+end
+
+let eval_script ?timeout t s ~keys ~args =
+  let sha = Script.sha s in
+  let known_loaded =
+    Eio.Mutex.use_rw ~protect:true t.loaded_shas_mutex (fun () ->
+        Hashtbl.mem t.loaded_shas sha)
+  in
+  let remember () =
+    Eio.Mutex.use_rw ~protect:true t.loaded_shas_mutex (fun () ->
+        Hashtbl.replace t.loaded_shas sha ())
+  in
+  let forget () =
+    Eio.Mutex.use_rw ~protect:true t.loaded_shas_mutex (fun () ->
+        Hashtbl.remove t.loaded_shas sha)
+  in
+  let do_eval () =
+    match eval ?timeout t ~script:(Script.source s) ~keys ~args with
+    | Ok v -> remember (); Ok v
+    | Error e -> Error e
+  in
+  if not known_loaded then do_eval ()
+  else
+    match evalsha ?timeout t ~sha ~keys ~args with
+    | Ok v -> Ok v
+    | Error (Connection.Error.Server_error ve)
+      when ve.code = "NOSCRIPT" ->
+        forget ();
+        do_eval ()
+    | Error e -> Error e
+
+let eval_cached ?timeout t ~script ~keys ~args =
+  eval_script ?timeout t (Script.create script) ~keys ~args
 
 (* ---------- iteration ---------- *)
 

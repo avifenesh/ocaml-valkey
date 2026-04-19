@@ -5,4 +5,5 @@
   eio eio.unix eio_main
   cstruct
   tls tls-eio x509 ca-certs domain-name
-  mirage-crypto-rng.unix))
+  mirage-crypto-rng.unix
+  digestif.c))
