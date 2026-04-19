@@ -292,7 +292,7 @@ type t = {
   with_timeout : 'a. float -> (unit -> 'a) -> ('a, [ `Timeout ]) result;
   mutable server_info : Resp3.t option;
   mutable availability_zone : string option;
-  mutable closing : bool;
+  closing : bool Atomic.t;
   mutable keepalive_count : int;
   cb : Circuit_breaker.state option;
   cancel_signal : unit Eio.Promise.t;
@@ -467,7 +467,7 @@ let jittered_backoff (policy : Reconnect.t) attempts =
 
 let write_worker (t : t) (sock : socket) : exn option =
   let rec loop () =
-    if t.closing then None
+    if Atomic.get t.closing then None
     else begin
       let q =
         match t.unsent with
@@ -494,7 +494,7 @@ let write_worker (t : t) (sock : socket) : exn option =
 
 let read_worker (t : t) (sock : socket) : [ `Closed | `Error ] =
   let rec loop () =
-    if t.closing then `Closed
+    if Atomic.get t.closing then `Closed
     else
       let outcome =
         try
@@ -560,7 +560,7 @@ let recovery_loop (t : t) : unit =
       | None -> false
       | Some m -> n >= m
     in
-    if t.closing then ()
+    if Atomic.get t.closing then ()
     else if timed_out_total || maxed_attempts then
       Eio.Mutex.use_rw ~protect:true t.state_mutex (fun () ->
           set_state t (Dead (Terminal "reconnect budget exhausted"));
@@ -656,14 +656,14 @@ let request ?timeout t args =
 
 let keepalive_loop t interval =
   let rec loop () =
-    if t.closing then ()
+    if Atomic.get t.closing then ()
     else
       let cancelled =
         Eio.Fiber.first
           (fun () -> t.sleep interval; false)
           (fun () -> Eio.Promise.await t.cancel_signal; true)
       in
-      if cancelled || t.closing then ()
+      if cancelled || Atomic.get t.closing then ()
       else (
         (match t.state with
          | Alive ->
@@ -676,7 +676,7 @@ let keepalive_loop t interval =
   try loop () with _ -> ()
 
 let rec supervisor_run t =
-  if t.closing then ()
+  if Atomic.get t.closing then ()
   else
     let state, current =
       Eio.Mutex.use_rw ~protect:true t.state_mutex (fun () ->
@@ -686,7 +686,7 @@ let rec supervisor_run t =
     | Dead _, _ -> ()
     | Alive, Some sock ->
         let _ = run_connection t sock in
-        if t.closing then ()
+        if Atomic.get t.closing then ()
         else (
           (try sock.close () with _ -> ());
           Eio.Mutex.use_rw ~protect:true t.state_mutex (fun () ->
@@ -696,7 +696,7 @@ let rec supervisor_run t =
           supervisor_run t)
     | _ -> ()
 
-let connect ~sw ~net ~clock ?(config = Config.default) ~host ~port () =
+let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port () =
   let connect_once = make_tcp_connector ~sw ~net ~host ~port ~tls:config.tls in
   let sleep d = Eio.Time.sleep clock d in
   let now () = Eio.Time.now clock in
@@ -724,7 +724,7 @@ let connect ~sw ~net ~clock ?(config = Config.default) ~host ~port () =
     with_timeout;
     server_info = None;
     availability_zone = None;
-    closing = false;
+    closing = Atomic.make false;
     keepalive_count = 0;
     cb = Option.map Circuit_breaker.make config.circuit_breaker;
     cancel_signal;
@@ -743,11 +743,20 @@ let connect ~sw ~net ~clock ?(config = Config.default) ~host ~port () =
        t.server_info <- Some info;
        t.availability_zone <- az;
        t.state <- Alive);
-  Eio.Fiber.fork ~sw (fun () -> supervisor_run t);
-  (match config.keepalive_interval with
-   | None -> ()
-   | Some interval ->
-       Eio.Fiber.fork ~sw (fun () -> keepalive_loop t interval));
+  let run_workers () =
+    Eio.Switch.run @@ fun worker_sw ->
+    Eio.Fiber.fork ~sw:worker_sw (fun () -> supervisor_run t);
+    (match config.keepalive_interval with
+     | None -> ()
+     | Some interval ->
+         Eio.Fiber.fork ~sw:worker_sw (fun () -> keepalive_loop t interval))
+  in
+  (match domain_mgr with
+   | None ->
+       Eio.Fiber.fork ~sw (fun () -> run_workers ())
+   | Some mgr ->
+       Eio.Fiber.fork ~sw (fun () ->
+           Eio.Domain_manager.run mgr run_workers));
   t
 
 let pushes t = t.pushes
@@ -757,7 +766,7 @@ let state t = t.state
 let keepalive_count t = t.keepalive_count
 
 let close t =
-  t.closing <- true;
+  Atomic.set t.closing true;
   (if not (Eio.Promise.is_resolved t.cancel_signal) then
      Eio.Promise.resolve t.cancel_resolver ());
   Chan.close t.cmd_queue;

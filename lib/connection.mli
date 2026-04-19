@@ -81,11 +81,17 @@ val connect :
   sw:Eio.Switch.t ->
   net:_ Eio.Net.t ->
   clock:_ Eio.Time.clock ->
+  ?domain_mgr:_ Eio.Domain_manager.t ->
   ?config:Config.t ->
   host:string ->
   port:int ->
   unit ->
   t
+(** If [domain_mgr] is supplied, the supervisor + reader + writer + keepalive
+    fibers run on a dedicated OS thread (Domain). Parser CPU cost no longer
+    competes with user-fiber scheduling on the main domain.
+
+    If omitted, they run on the caller's domain (current behaviour). *)
 
 val request :
   ?timeout:float ->
