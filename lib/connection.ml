@@ -507,7 +507,9 @@ let in_pump (t : t) (sock : socket) (bytes_chan : Cstruct.t Eio.Stream.t)
   let rec loop () =
     if Atomic.get t.closing then ()
     else
-      let buf = Cstruct.create 8192 in
+      (* create_unsafe skips the zero-fill; we overwrite with
+         read_into immediately. Free micro-optimisation. *)
+      let buf = Cstruct.create_unsafe 8192 in
       match
         try
           let n = sock.read_into buf in
@@ -522,7 +524,6 @@ let in_pump (t : t) (sock : socket) (bytes_chan : Cstruct.t Eio.Stream.t)
           loop ()
   in
   (try loop () with _ -> ());
-  (* Signal the parser fiber that no more bytes are coming. *)
   Byte_reader.close reader
 
 let parse_worker (t : t) (byte_src : Resp3_parser.byte_source) : unit =

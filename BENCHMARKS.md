@@ -66,24 +66,52 @@ necked by OS-thread scheduling.
 OCaml-client noise band. This used to be 47 %; see the writer
 commit below.
 
-## Send-path optimization (commit history)
+## Optimisation history
 
-The first benchmark pass showed SET 16 KiB at only 47 % of C. The
-culprit was the wire-encoder allocating through `Buffer.t`
-[`Buffer.add_string` + `Buffer.contents`] before the Cstruct copy
-that `Eio.Flow.copy_string` does internally — three touches of the
-16 KiB payload per request.
+**Send path — wire encoder.** First pass showed SET 16 KiB at only
+47 % of C. The wire encoder built each command through a `Buffer.t`
+(`Buffer.add_string` + `Buffer.contents`, two copies of the payload)
+and then `Eio.Flow.copy_string` internally wrapped the result in a
+Cstruct. Three touches of the 16 KiB value per request.
 
-The fix (`Resp3_writer.command_to_cstruct`):
-
+Replaced with `Resp3_writer.command_to_cstruct`:
 1. Compute the exact encoded size from the args array in O(args).
 2. Allocate one `Cstruct.t` at that size via `Cstruct.create_unsafe`.
 3. `Cstruct.blit_from_string` each argument in once.
 4. `Eio.Flow.write sink [cs]` — single writev on the socket.
 
-One copy of the payload per request instead of two, and no wasted
-intermediate string. SET 16 KiB rose from ~28 k r/s to ~50 k r/s,
-bringing the ratio to C from 47 % to 91 %.
+One copy instead of two. **SET 16 KiB: 28 k → 50 k r/s (47 % → 91 %
+of C).**
+
+**Receive path — investigation.** The matching GET 16 KiB was at
+67 % of C and we spent a session chasing it. Things tried and what
+they did:
+
+- `Cstruct.create_unsafe 8192` in `in_pump` (skip zero-fill): free
+  micro-opt, kept.
+- Bump the read buffer to 64 KiB: regressed. Larger per-iteration
+  Bigarray allocation cost more than the merged-reads saved.
+- Skip the `bytes_chan` stream in single-domain mode and have the
+  parser pull bytes directly from the socket: regressed at conc=10.
+  The stream's implicit prefetch (in_pump can read the next chunk
+  while the parser is still decoding the current reply) matters
+  more than the allocation saving.
+- Pool the 8 KiB Cstructs between `in_pump` and the reader:
+  no measurable difference. The extra `Eio.Stream` take/put on the
+  pool path roughly cancels the allocation saved.
+
+The remaining ~33 % gap on GET 16 KiB is the cost of our fibre
+pipeline (in_pump → stream → reader → parser → promise resolve →
+user fibre wake) vs. hiredis's tight inline loop. Closing it would
+need a structural change; none of the micro-optimisations around
+buffers were enough.
+
+**Net after the investigation** (median over 5 runs):
+
+|                         | before | after | vs C |
+|-------------------------|-------:|------:|-----:|
+| SET 16 KiB   conc=10    | 28 k   | 49 k  | 91 % |
+| GET 16 KiB   conc=10    | 41 k   | 41 k  | 72 % |
 
 ## Methodology notes
 
