@@ -319,3 +319,41 @@ val sismember :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> string -> (bool, Connection.Error.t) result
+
+(** {1 Lists} *)
+
+val lpush :
+  ?timeout:float ->
+  t -> string -> string list -> (int, Connection.Error.t) result
+(** Returns the new list length. *)
+
+val rpush :
+  ?timeout:float ->
+  t -> string -> string list -> (int, Connection.Error.t) result
+
+val lpop :
+  ?timeout:float ->
+  t -> string -> (string option, Connection.Error.t) result
+
+val lpop_n :
+  ?timeout:float ->
+  t -> string -> int -> (string list, Connection.Error.t) result
+
+val rpop :
+  ?timeout:float ->
+  t -> string -> (string option, Connection.Error.t) result
+
+val rpop_n :
+  ?timeout:float ->
+  t -> string -> int -> (string list, Connection.Error.t) result
+
+val lrange :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> start:int -> stop:int ->
+  (string list, Connection.Error.t) result
+
+val llen :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> (int, Connection.Error.t) result

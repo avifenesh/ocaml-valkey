@@ -506,3 +506,52 @@ let smembers ?timeout ?read_from t key =
 let sismember ?timeout ?read_from t key member =
   bool_from_integer "SISMEMBER"
     (exec ?timeout ?read_from t [| "SISMEMBER"; key; member |])
+
+(* ---------- lists ---------- *)
+
+let int_of_push_reply cmd = function
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation cmd v)
+  | Error e -> Error e
+
+let lpush ?timeout t key elements =
+  let args = Array.of_list ("LPUSH" :: key :: elements) in
+  int_of_push_reply "LPUSH" (exec ?timeout t args)
+
+let rpush ?timeout t key elements =
+  let args = Array.of_list ("RPUSH" :: key :: elements) in
+  int_of_push_reply "RPUSH" (exec ?timeout t args)
+
+let pop_single cmd ?timeout t key =
+  match exec ?timeout t [| cmd; key |] with
+  | Error e -> Error e
+  | Ok Resp3.Null -> Ok None
+  | Ok (Resp3.Bulk_string s) -> Ok (Some s)
+  | Ok v -> Error (protocol_violation cmd v)
+
+let pop_many cmd ?timeout t key count =
+  match exec ?timeout t [| cmd; key; string_of_int count |] with
+  | Error e -> Error e
+  | Ok Resp3.Null -> Ok []
+  | Ok (Resp3.Array items) -> strings_of_resp3_collection cmd items
+  | Ok v -> Error (protocol_violation cmd v)
+
+let lpop ?timeout t key = pop_single "LPOP" ?timeout t key
+let rpop ?timeout t key = pop_single "RPOP" ?timeout t key
+let lpop_n ?timeout t key n = pop_many "LPOP" ?timeout t key n
+let rpop_n ?timeout t key n = pop_many "RPOP" ?timeout t key n
+
+let lrange ?timeout ?read_from t key ~start ~stop =
+  match
+    exec ?timeout ?read_from t
+      [| "LRANGE"; key; string_of_int start; string_of_int stop |]
+  with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) -> strings_of_resp3_collection "LRANGE" items
+  | Ok v -> Error (protocol_violation "LRANGE" v)
+
+let llen ?timeout ?read_from t key =
+  match exec ?timeout ?read_from t [| "LLEN"; key |] with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "LLEN" v)

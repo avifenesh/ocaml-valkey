@@ -481,6 +481,54 @@ let tests =
        | Error e -> Alcotest.failf "SMEMBERS: %a" E.pp e);
       let _ = C.del c [ key ] in
       ());
+    Alcotest.test_case "LPUSH / RPUSH / LRANGE / LLEN / LPOP / RPOP" `Quick
+      (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:list" in
+      let _ = C.del c [ key ] in
+      Alcotest.(check int) "LPUSH b a -> len 2" 2
+        (match C.lpush c key [ "b"; "a" ] with
+         | Ok n -> n | Error e -> Alcotest.failf "LPUSH: %a" E.pp e);
+      (* after LPUSH b a: list is [a; b] (each pushed to head, so a ends up front) *)
+      Alcotest.(check int) "RPUSH c d -> len 4" 4
+        (match C.rpush c key [ "c"; "d" ] with
+         | Ok n -> n | Error e -> Alcotest.failf "RPUSH: %a" E.pp e);
+      (* list now: [a; b; c; d] *)
+      Alcotest.(check int) "LLEN" 4
+        (match C.llen c key with
+         | Ok n -> n | Error e -> Alcotest.failf "LLEN: %a" E.pp e);
+      (match C.lrange c key ~start:0 ~stop:(-1) with
+       | Ok xs -> Alcotest.(check (list string)) "LRANGE 0 -1"
+           [ "a"; "b"; "c"; "d" ] xs
+       | Error e -> Alcotest.failf "LRANGE: %a" E.pp e);
+      (match C.lpop c key with
+       | Ok (Some "a") -> ()
+       | other -> Alcotest.failf "LPOP: %s"
+           (match other with
+            | Ok None -> "None"
+            | Ok (Some s) -> Printf.sprintf "Some %S" s
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      (match C.rpop c key with
+       | Ok (Some "d") -> ()
+       | other -> Alcotest.failf "RPOP: %s"
+           (match other with
+            | Ok None -> "None"
+            | Ok (Some s) -> Printf.sprintf "Some %S" s
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      (match C.lpop_n c key 5 with
+       | Ok [ "b"; "c" ] -> ()
+       | Ok xs -> Alcotest.failf "LPOP 5 from 2-elem: got %d items"
+           (List.length xs)
+       | Error e -> Alcotest.failf "LPOP_n: %a" E.pp e);
+      (match C.lpop c key with
+       | Ok None -> ()
+       | other -> Alcotest.failf "LPOP empty: %s"
+           (match other with
+            | Ok (Some s) -> Printf.sprintf "Some %S" s
+            | Ok None -> "impossible"
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      let _ = C.del c [ key ] in
+      ());
     Alcotest.test_case "HINCRBY" `Quick (fun () ->
       with_client @@ fun c ->
       let key = "ocaml:c:h4" in
