@@ -445,3 +445,91 @@ val keys :
   t -> string -> (string list, Connection.Error.t) result
 (** [KEYS pattern]. Use [scan] in production; [KEYS] is O(N) and blocks
     the server. *)
+
+(** {1 Streams (non-blocking)}
+
+    Blocking variants (XREAD BLOCK, XREADGROUP BLOCK) will ship with the
+    blocking-commands session since they share the exclusive-connection
+    machinery. *)
+
+type stream_entry = {
+  id : string;
+  fields : (string * string) list;
+}
+
+type xadd_trim =
+  | Xadd_maxlen of { approx : bool; threshold : int }
+  | Xadd_minid of { approx : bool; threshold : string }
+
+val xadd :
+  ?timeout:float ->
+  ?id:string ->
+  ?nomkstream:bool ->
+  ?trim:xadd_trim ->
+  t -> string -> (string * string) list ->
+  (string, Connection.Error.t) result
+(** Returns the assigned entry ID. [id] defaults to ["*"] — server-assigned. *)
+
+val xlen :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> (int, Connection.Error.t) result
+
+val xrange :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  ?count:int ->
+  t -> string -> start:string -> end_:string ->
+  (stream_entry list, Connection.Error.t) result
+
+val xrevrange :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  ?count:int ->
+  t -> string -> end_:string -> start:string ->
+  (stream_entry list, Connection.Error.t) result
+
+val xdel :
+  ?timeout:float ->
+  t -> string -> string list -> (int, Connection.Error.t) result
+
+type xtrim_strategy =
+  | Xtrim_maxlen of { approx : bool; threshold : int }
+  | Xtrim_minid of { approx : bool; threshold : string }
+
+val xtrim :
+  ?timeout:float ->
+  t -> string -> xtrim_strategy -> (int, Connection.Error.t) result
+
+val xread :
+  ?timeout:float ->
+  ?count:int ->
+  t -> streams:(string * string) list ->
+  ((string * stream_entry list) list, Connection.Error.t) result
+
+type xgroup_create_option =
+  | Xgroup_mkstream
+  | Xgroup_entries_read of int
+
+val xgroup_create :
+  ?timeout:float ->
+  ?opts:xgroup_create_option list ->
+  t -> string -> group:string -> id:string ->
+  (unit, Connection.Error.t) result
+
+val xgroup_destroy :
+  ?timeout:float ->
+  t -> string -> group:string -> (bool, Connection.Error.t) result
+
+val xreadgroup :
+  ?timeout:float ->
+  ?count:int ->
+  ?noack:bool ->
+  t -> group:string -> consumer:string ->
+  streams:(string * string) list ->
+  ((string * stream_entry list) list, Connection.Error.t) result
+
+val xack :
+  ?timeout:float ->
+  t -> string -> group:string -> string list ->
+  (int, Connection.Error.t) result

@@ -628,6 +628,104 @@ let tests =
            Alcotest.(check int) "KEYS found all seeded" n (List.length ks)
        | Error e -> Alcotest.failf "KEYS: %a" E.pp e);
       List.iter (fun k -> ignore (C.del c [ k ])) keys);
+    Alcotest.test_case "streams: XADD / XLEN / XRANGE / XREAD" `Quick
+      (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:stream" in
+      let _ = C.del c [ key ] in
+      let id1 =
+        match C.xadd c key [ "a", "1" ] with
+        | Ok s -> s | Error e -> Alcotest.failf "XADD 1: %a" E.pp e
+      in
+      let id2 =
+        match C.xadd c key [ "a", "2"; "b", "3" ] with
+        | Ok s -> s | Error e -> Alcotest.failf "XADD 2: %a" E.pp e
+      in
+      Alcotest.(check int) "XLEN" 2
+        (match C.xlen c key with
+         | Ok n -> n | Error e -> Alcotest.failf "XLEN: %a" E.pp e);
+      (match C.xrange c key ~start:"-" ~end_:"+" with
+       | Ok [ e1; e2 ] ->
+           Alcotest.(check string) "first id" id1 e1.id;
+           Alcotest.(check string) "second id" id2 e2.id;
+           Alcotest.(check (list (pair string string)))
+             "first fields" [ "a", "1" ] e1.fields;
+           Alcotest.(check (list (pair string string)))
+             "second fields" [ "a", "2"; "b", "3" ] e2.fields
+       | Ok xs ->
+           Alcotest.failf "XRANGE: expected 2 entries, got %d"
+             (List.length xs)
+       | Error e -> Alcotest.failf "XRANGE: %a" E.pp e);
+      (match C.xread c ~streams:[ key, "0" ] with
+       | Ok [ (k, entries) ] when k = key ->
+           Alcotest.(check int) "XREAD entries" 2 (List.length entries)
+       | Ok _ -> Alcotest.fail "XREAD unexpected structure"
+       | Error e -> Alcotest.failf "XREAD: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "streams: XDEL / XTRIM" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:stream2" in
+      let _ = C.del c [ key ] in
+      let ids =
+        List.init 5 (fun i ->
+          match C.xadd c key [ "i", string_of_int i ] with
+          | Ok s -> s | Error e -> Alcotest.failf "XADD: %a" E.pp e)
+      in
+      (match C.xdel c key [ List.nth ids 2 ] with
+       | Ok 1 -> ()
+       | other -> Alcotest.failf "XDEL: %s"
+           (match other with
+            | Ok n -> string_of_int n
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      (match
+         C.xtrim c key (Xtrim_maxlen { approx = false; threshold = 2 })
+       with
+       | Ok n when n >= 1 -> ()
+       | Ok n -> Alcotest.failf "XTRIM: expected >=1 removed, got %d" n
+       | Error e -> Alcotest.failf "XTRIM: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "streams: XGROUP / XREADGROUP / XACK" `Quick
+      (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:sg" in
+      let group = "g1" in
+      let consumer = "c1" in
+      let _ = C.del c [ key ] in
+      let _ =
+        match
+          C.xgroup_create c key ~group ~id:"0" ~opts:[ Xgroup_mkstream ]
+        with
+        | Ok () -> ()
+        | Error e -> Alcotest.failf "XGROUP CREATE: %a" E.pp e
+      in
+      let id =
+        match C.xadd c key [ "k", "v" ] with
+        | Ok s -> s | Error e -> Alcotest.failf "XADD: %a" E.pp e
+      in
+      (match
+         C.xreadgroup c ~group ~consumer ~streams:[ key, ">" ]
+       with
+       | Ok [ (k, [ e ]) ] when k = key && e.id = id -> ()
+       | Ok xs ->
+           Alcotest.failf "XREADGROUP unexpected (%d streams)"
+             (List.length xs)
+       | Error e -> Alcotest.failf "XREADGROUP: %a" E.pp e);
+      (match C.xack c key ~group [ id ] with
+       | Ok 1 -> ()
+       | other -> Alcotest.failf "XACK: %s"
+           (match other with
+            | Ok n -> string_of_int n
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      (match C.xgroup_destroy c key ~group with
+       | Ok true -> ()
+       | other -> Alcotest.failf "XGROUP DESTROY: %s"
+           (match other with
+            | Ok b -> Printf.sprintf "Ok %b" b
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      let _ = C.del c [ key ] in
+      ());
     Alcotest.test_case "HINCRBY" `Quick (fun () ->
       with_client @@ fun c ->
       let key = "ocaml:c:h4" in

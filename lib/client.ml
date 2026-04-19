@@ -699,3 +699,227 @@ let keys ?timeout ?read_from t pattern =
   | Error e -> Error e
   | Ok (Resp3.Array items) -> strings_of_resp3_collection "KEYS" items
   | Ok v -> Error (protocol_violation "KEYS" v)
+
+(* ---------- streams ---------- *)
+
+type stream_entry = { id : string; fields : (string * string) list }
+
+let parse_fields cmd items =
+  let rec loop acc = function
+    | [] -> Ok (List.rev acc)
+    | [ _ ] -> Error (protocol_violation cmd (Resp3.Array items))
+    | k :: v :: rest ->
+        (match extract_string cmd k, extract_string cmd v with
+         | Ok f, Ok vv -> loop ((f, vv) :: acc) rest
+         | Error e, _ | _, Error e -> Error e)
+  in
+  loop [] items
+
+let parse_entry cmd = function
+  | Resp3.Array [ id_v; Resp3.Array field_items ] ->
+      (match extract_string cmd id_v with
+       | Error e -> Error e
+       | Ok id ->
+           (match parse_fields cmd field_items with
+            | Ok fields -> Ok { id; fields }
+            | Error e -> Error e))
+  | Resp3.Array [ id_v; Resp3.Map kvs ] ->
+      (match extract_string cmd id_v with
+       | Error e -> Error e
+       | Ok id ->
+           let rec loop acc = function
+             | [] -> Ok (List.rev acc)
+             | (k, v) :: rest ->
+                 (match extract_string cmd k, extract_string cmd v with
+                  | Ok f, Ok vv -> loop ((f, vv) :: acc) rest
+                  | Error e, _ | _, Error e -> Error e)
+           in
+           (match loop [] kvs with
+            | Ok fields -> Ok { id; fields }
+            | Error e -> Error e))
+  | Resp3.Null -> Ok { id = ""; fields = [] }
+  | v -> Error (protocol_violation cmd v)
+
+let parse_entries cmd items =
+  let rec loop acc = function
+    | [] -> Ok (List.rev acc)
+    | e :: rest ->
+        (match parse_entry cmd e with
+         | Ok entry -> loop (entry :: acc) rest
+         | Error err -> Error err)
+  in
+  loop [] items
+
+type xadd_trim =
+  | Xadd_maxlen of { approx : bool; threshold : int }
+  | Xadd_minid of { approx : bool; threshold : string }
+
+let xadd_trim_args = function
+  | None -> []
+  | Some (Xadd_maxlen { approx; threshold }) ->
+      [ "MAXLEN"; (if approx then "~" else "="); string_of_int threshold ]
+  | Some (Xadd_minid { approx; threshold }) ->
+      [ "MINID"; (if approx then "~" else "="); threshold ]
+
+let xadd ?timeout ?(id = "*") ?(nomkstream = false) ?trim t key fields =
+  let nomk = if nomkstream then [ "NOMKSTREAM" ] else [] in
+  let trim_a = xadd_trim_args trim in
+  let pairs = List.concat_map (fun (f, v) -> [ f; v ]) fields in
+  let args =
+    Array.of_list
+      ([ "XADD"; key ] @ nomk @ trim_a @ [ id ] @ pairs)
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Bulk_string s) -> Ok s
+  | Ok Resp3.Null ->
+      (* NOMKSTREAM with a non-existing key returns nil *)
+      Error
+        (Connection.Error.Protocol_violation
+           "XADD returned Null (NOMKSTREAM on missing stream)")
+  | Ok v -> Error (protocol_violation "XADD" v)
+
+let xlen ?timeout ?read_from t key =
+  match exec ?timeout ?read_from t [| "XLEN"; key |] with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "XLEN" v)
+
+let xrange_like cmd ?timeout ?read_from ?count t key a b =
+  let count_a = match count with
+    | None -> []
+    | Some n -> [ "COUNT"; string_of_int n ]
+  in
+  let args = Array.of_list ([ cmd; key; a; b ] @ count_a) in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) -> parse_entries cmd items
+  | Ok v -> Error (protocol_violation cmd v)
+
+let xrange ?timeout ?read_from ?count t key ~start ~end_ =
+  xrange_like "XRANGE" ?timeout ?read_from ?count t key start end_
+
+let xrevrange ?timeout ?read_from ?count t key ~end_ ~start =
+  xrange_like "XREVRANGE" ?timeout ?read_from ?count t key end_ start
+
+let xdel ?timeout t key ids =
+  let args = Array.of_list ("XDEL" :: key :: ids) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "XDEL" v)
+
+type xtrim_strategy =
+  | Xtrim_maxlen of { approx : bool; threshold : int }
+  | Xtrim_minid of { approx : bool; threshold : string }
+
+let xtrim ?timeout t key strategy =
+  let strat_args = match strategy with
+    | Xtrim_maxlen { approx; threshold } ->
+        [ "MAXLEN"; (if approx then "~" else "="); string_of_int threshold ]
+    | Xtrim_minid { approx; threshold } ->
+        [ "MINID"; (if approx then "~" else "="); threshold ]
+  in
+  let args = Array.of_list ([ "XTRIM"; key ] @ strat_args) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "XTRIM" v)
+
+let parse_streams_reply cmd = function
+  | Resp3.Null -> Ok []
+  | Resp3.Array items ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | Resp3.Array [ name_v; Resp3.Array entries ] :: rest ->
+            (match extract_string cmd name_v with
+             | Error e -> Error e
+             | Ok name ->
+                 (match parse_entries cmd entries with
+                  | Ok es -> loop ((name, es) :: acc) rest
+                  | Error e -> Error e))
+        | other :: _ -> Error (protocol_violation cmd other)
+      in
+      loop [] items
+  | Resp3.Map kvs ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | (name_v, Resp3.Array entries) :: rest ->
+            (match extract_string cmd name_v with
+             | Error e -> Error e
+             | Ok name ->
+                 (match parse_entries cmd entries with
+                  | Ok es -> loop ((name, es) :: acc) rest
+                  | Error e -> Error e))
+        | (_, other) :: _ -> Error (protocol_violation cmd other)
+      in
+      loop [] kvs
+  | v -> Error (protocol_violation cmd v)
+
+let xread ?timeout ?count t ~streams =
+  let count_a = match count with
+    | None -> []
+    | Some n -> [ "COUNT"; string_of_int n ]
+  in
+  let keys = List.map fst streams in
+  let ids = List.map snd streams in
+  let args =
+    Array.of_list (
+      [ "XREAD" ] @ count_a @ [ "STREAMS" ] @ keys @ ids
+    )
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok v -> parse_streams_reply "XREAD" v
+
+type xgroup_create_option =
+  | Xgroup_mkstream
+  | Xgroup_entries_read of int
+
+let xgroup_create ?timeout ?(opts = []) t key ~group ~id =
+  let opt_args =
+    List.concat_map
+      (function
+        | Xgroup_mkstream -> [ "MKSTREAM" ]
+        | Xgroup_entries_read n -> [ "ENTRIESREAD"; string_of_int n ])
+      opts
+  in
+  let args =
+    Array.of_list (
+      [ "XGROUP"; "CREATE"; key; group; id ] @ opt_args
+    )
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Simple_string "OK") -> Ok ()
+  | Ok v -> Error (protocol_violation "XGROUP CREATE" v)
+
+let xgroup_destroy ?timeout t key ~group =
+  bool_from_integer "XGROUP DESTROY"
+    (exec ?timeout t [| "XGROUP"; "DESTROY"; key; group |])
+
+let xreadgroup ?timeout ?count ?(noack = false) t ~group ~consumer ~streams =
+  let count_a = match count with
+    | None -> []
+    | Some n -> [ "COUNT"; string_of_int n ]
+  in
+  let noack_a = if noack then [ "NOACK" ] else [] in
+  let keys = List.map fst streams in
+  let ids = List.map snd streams in
+  let args =
+    Array.of_list (
+      [ "XREADGROUP"; "GROUP"; group; consumer ]
+      @ count_a @ noack_a
+      @ [ "STREAMS" ] @ keys @ ids
+    )
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok v -> parse_streams_reply "XREADGROUP" v
+
+let xack ?timeout t key ~group ids =
+  let args = Array.of_list ("XACK" :: key :: group :: ids) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "XACK" v)
