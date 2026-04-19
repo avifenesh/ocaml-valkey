@@ -8,6 +8,7 @@ module Slot = Slot
 module Topology = Topology
 module Node_pool = Node_pool
 module Discovery = Discovery
+module Router = Router
 module Connection = Connection
 module Client = Client
 module Cluster_router = Cluster_router

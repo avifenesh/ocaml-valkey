@@ -1,47 +1,10 @@
 (** High-level Valkey client. Standalone in v1; cluster router lands later
     without changing this surface. *)
 
-module Read_from : sig
-  type t =
-    | Primary
-    | Prefer_replica
-    | Az_affinity of { az : string }
-    | Az_affinity_replicas_and_primary of { az : string }
+(** Re-exports of routing types. The canonical home is [Valkey.Router]. *)
 
-  val default : t
-  (** [Primary] — all reads to primary. *)
-end
-
-module Target : sig
-  type t =
-    | Random
-    | All_nodes
-    | All_primaries
-    | By_slot of int
-    | By_node of string
-    | By_channel of string
-end
-
-module Router : sig
-  type t
-
-  val make :
-    exec:(?timeout:float -> Target.t -> Read_from.t -> string array ->
-          (Resp3.t, Connection.Error.t) result) ->
-    close:(unit -> unit) ->
-    primary:(unit -> Connection.t option) ->
-    t
-
-  val standalone : Connection.t -> t
-
-  val exec :
-    ?timeout:float -> t -> Target.t -> Read_from.t -> string array ->
-    (Resp3.t, Connection.Error.t) result
-
-  val close : t -> unit
-
-  val primary_connection : t -> Connection.t option
-end
+module Read_from = Router.Read_from
+module Target = Router.Target
 
 module Config : sig
   type t = {
@@ -66,8 +29,7 @@ val connect :
   t
 
 val from_router : config:Config.t -> Router.t -> t
-(** Wrap an arbitrary [Router.t] (e.g. a cluster router) as a [Client.t].
-    Used by [Cluster_router] and other custom routers. *)
+(** Wrap an arbitrary [Router.t] (e.g. cluster router) as a [Client.t]. *)
 
 val close : t -> unit
 

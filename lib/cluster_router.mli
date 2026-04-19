@@ -24,4 +24,13 @@ val create :
   ?domain_mgr:_ Eio.Domain_manager.t ->
   config:Config.t ->
   unit ->
-  (Client.Router.t, string) result
+  (Router.t, string) result
+
+val from_pool_and_topology :
+  pool:Node_pool.t ->
+  topology:Topology.t ->
+  Router.t
+(** Wrap an existing pool + topology as a Router. Used internally for
+    the standalone-as-one-shard-cluster code path, where the pool
+    already contains the single connection and the topology is
+    synthetic. *)

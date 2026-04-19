@@ -1,22 +1,5 @@
-module Read_from = struct
-  type t =
-    | Primary
-    | Prefer_replica
-    | Az_affinity of { az : string }
-    | Az_affinity_replicas_and_primary of { az : string }
-
-  let default = Primary
-end
-
-module Target = struct
-  type t =
-    | Random
-    | All_nodes
-    | All_primaries
-    | By_slot of int
-    | By_node of string
-    | By_channel of string
-end
+module Read_from = Router.Read_from
+module Target = Router.Target
 
 module Config = struct
   type t = {
@@ -31,33 +14,6 @@ module Config = struct
   }
 end
 
-(* Router — dispatcher between typed Client.exec and the per-target
-   Connection(s). Standalone ships today; cluster will add a sibling
-   implementation without changing the Client surface. *)
-module Router = struct
-  type t = {
-    exec :
-      ?timeout:float -> Target.t -> Read_from.t -> string array ->
-      (Resp3.t, Connection.Error.t) result;
-    close : unit -> unit;
-    primary : unit -> Connection.t option;
-  }
-  [@@warning "-69"]
-
-  let make ~exec ~close ~primary = { exec; close; primary }
-
-  let standalone (conn : Connection.t) : t =
-    { exec = (fun ?timeout _target _read_from args ->
-        Connection.request ?timeout conn args);
-      close = (fun () -> Connection.close conn);
-      primary = (fun () -> Some conn);
-    }
-
-  let exec ?timeout t target rf args = t.exec ?timeout target rf args
-  let close t = t.close ()
-  let primary_connection t = t.primary ()
-end
-
 type t = {
   router : Router.t;
   config : Config.t;
@@ -67,11 +23,20 @@ type t = {
 [@@warning "-69"]
 
 let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port () =
+  (* Standalone is a degenerate one-shard cluster: synthesise a topology,
+     stash the one Connection in a Node_pool, and dispatch through the
+     same Cluster_router code path that handles real clusters. *)
   let connection =
     Connection.connect ~sw ~net ~clock ?domain_mgr
       ~config:config.connection ~host ~port ()
   in
-  let router = Router.standalone connection in
+  let tls_port =
+    if config.connection.tls <> None then Some port else None
+  in
+  let topology = Topology.single_primary ~host ~port ?tls_port () in
+  let pool = Node_pool.create () in
+  Node_pool.add pool Topology.standalone_node_id connection;
+  let router = Cluster_router.from_pool_and_topology ~pool ~topology in
   { router; config;
     loaded_shas = Hashtbl.create 16;
     loaded_shas_mutex = Eio.Mutex.create () }

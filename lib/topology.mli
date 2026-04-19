@@ -62,3 +62,21 @@ val serialize : t -> string
 val sha : t -> string
 (** SHA1 of [serialize]. Comparing SHAs of two topologies reliably
     detects change. *)
+
+val of_shards : Shard.t list -> t
+(** Low-level constructor — builds the slot map and SHA. Used to craft
+    synthetic topologies (e.g. standalone as a single-shard cluster). *)
+
+val standalone_node_id : string
+(** Stable node id assigned to synthetic single-node topologies. *)
+
+val single_primary :
+  host:string ->
+  port:int ->
+  ?tls_port:int ->
+  ?availability_zone:string ->
+  unit ->
+  t
+(** A one-shard, one-node topology owning all 16384 slots. For
+    standalone mode: treats the server as a degenerate cluster so the
+    same router dispatches both cases. *)

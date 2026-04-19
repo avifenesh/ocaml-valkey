@@ -285,3 +285,35 @@ let serialize t =
   |> String.concat "\n"
 
 let sha t = t.sha_cache
+
+let of_shards shards =
+  { shards;
+    slot_map = build_slot_map shards;
+    sha_cache = build_sha shards }
+
+let standalone_node_id = "standalone"
+
+let single_primary ~host ~port ?tls_port ?availability_zone () =
+  let node =
+    { Node.
+      id = standalone_node_id;
+      endpoint = Some host;
+      ip = None;
+      hostname = None;
+      port = Some port;
+      tls_port;
+      role = Node.Primary;
+      health = Node.Online;
+      replication_offset = 0L;
+      availability_zone;
+    }
+  in
+  let shard =
+    { Shard.
+      id = None;
+      slots = [ { Shard.start_ = 0; end_ = Slot.slot_count - 1 } ];
+      primary = node;
+      replicas = [];
+    }
+  in
+  of_shards [ shard ]

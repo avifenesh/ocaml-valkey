@@ -41,23 +41,23 @@ let port_of_node ~tls (node : Topology.Node.t) =
     | Some p -> Some p
     | None -> node.tls_port
 
-let pick_node_by_read_from (rf : Client.Read_from.t) (shard : Topology.Shard.t) =
+let pick_node_by_read_from (rf : Router.Read_from.t) (shard : Topology.Shard.t) =
   let find_az az nodes =
     List.find_opt
       (fun (n : Topology.Node.t) -> n.availability_zone = Some az)
       nodes
   in
   match rf with
-  | Client.Read_from.Primary -> shard.primary
-  | Client.Read_from.Prefer_replica ->
+  | Router.Read_from.Primary -> shard.primary
+  | Router.Read_from.Prefer_replica ->
       (match shard.replicas with
        | [] -> shard.primary
        | r :: _ -> r)
-  | Client.Read_from.Az_affinity { az } ->
+  | Router.Read_from.Az_affinity { az } ->
       (match find_az az shard.replicas with
        | Some r -> r
        | None -> shard.primary)
-  | Client.Read_from.Az_affinity_replicas_and_primary { az } ->
+  | Router.Read_from.Az_affinity_replicas_and_primary { az } ->
       let all_nodes = shard.primary :: shard.replicas in
       (match find_az az all_nodes with
        | Some n -> n
@@ -97,11 +97,11 @@ let err_terminal fmt =
     (fun s -> Error (Connection.Error.Terminal s))
     fmt
 
-let make_exec ~pool ~topology_ref ?timeout (target : Client.Target.t)
-    (rf : Client.Read_from.t) (args : string array) =
+let make_exec ~pool ~topology_ref ?timeout (target : Router.Target.t)
+    (rf : Router.Read_from.t) (args : string array) =
   let topology = !topology_ref in
   match target with
-  | Client.Target.By_slot slot ->
+  | Router.Target.By_slot slot ->
       (match Topology.shard_for_slot topology slot with
        | None -> err_protocol "no shard owns slot %d" slot
        | Some shard ->
@@ -110,18 +110,29 @@ let make_exec ~pool ~topology_ref ?timeout (target : Client.Target.t)
             | None ->
                 err_terminal "no live connection for node %s" node.id
             | Some conn -> Connection.request ?timeout conn args))
-  | Client.Target.By_node node_id ->
+  | Router.Target.By_node node_id ->
       (match Node_pool.get pool node_id with
        | None -> err_terminal "unknown node %s" node_id
        | Some conn -> Connection.request ?timeout conn args)
-  | Client.Target.Random ->
+  | Router.Target.Random ->
       (match Node_pool.connections pool with
        | [] -> err_terminal "cluster has no live connections"
        | c :: _ -> Connection.request ?timeout c args)
-  | Client.Target.All_nodes | Client.Target.All_primaries ->
+  | Router.Target.All_nodes | Router.Target.All_primaries ->
       err_terminal "cluster router: fan-out targets not yet implemented"
-  | Client.Target.By_channel _ ->
+  | Router.Target.By_channel _ ->
       err_terminal "cluster router: sharded pub/sub not yet implemented"
+
+let from_pool_and_topology ~pool ~topology =
+  let topology_ref = ref topology in
+  let exec ?timeout target rf args =
+    make_exec ~pool ~topology_ref ?timeout target rf args
+  in
+  let close () = Node_pool.close_all pool in
+  let primary () =
+    match Node_pool.connections pool with [] -> None | c :: _ -> Some c
+  in
+  Router.make ~exec ~close ~primary
 
 let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
   match
@@ -140,10 +151,4 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
           ~prefer_hostname:cfg.prefer_hostname
           topology
       in
-      let topology_ref = ref topology in
-      let exec ?timeout target rf args =
-        make_exec ~pool ~topology_ref ?timeout target rf args
-      in
-      let close () = Node_pool.close_all pool in
-      let primary () = None in
-      Ok (Client.Router.make ~exec ~close ~primary)
+      Ok (from_pool_and_topology ~pool ~topology)
