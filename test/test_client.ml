@@ -389,6 +389,71 @@ let tests =
               | Error e -> Format.asprintf "Error %a" E.pp e));
       let _ = C.del c [ key ] in
       ());
+    Alcotest.test_case "HEXPIRE / HTTL / HPERSIST" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:hftl1" in
+      let _ = C.del c [ key ] in
+      ignore (C.hset c key [ "a", "1"; "b", "2" ]);
+      (match C.hexpire c key ~seconds:60 [ "a"; "b"; "nope" ] with
+       | Ok [ Hfield_ttl_set; Hfield_ttl_set; Hfield_missing ] -> ()
+       | Ok other ->
+           Alcotest.failf "HEXPIRE: unexpected pattern (%d items)"
+             (List.length other)
+       | Error e -> Alcotest.failf "HEXPIRE: %a" E.pp e);
+      (match C.httl c key [ "a"; "nope"; "b" ] with
+       | Ok [ Expires_in n; Absent; Expires_in m ]
+         when n > 30 && n <= 60 && m > 30 && m <= 60 -> ()
+       | Ok _ -> Alcotest.fail "HTTL values out of expected range"
+       | Error e -> Alcotest.failf "HTTL: %a" E.pp e);
+      (match C.hpersist c key [ "a"; "nope" ] with
+       | Ok [ Persist_ttl_removed; Persist_field_missing ] -> ()
+       | Ok _ -> Alcotest.fail "HPERSIST unexpected pattern"
+       | Error e -> Alcotest.failf "HPERSIST: %a" E.pp e);
+      (match C.httl c key [ "a" ] with
+       | Ok [ Persistent ] -> ()
+       | Ok _ -> Alcotest.fail "field should be Persistent after HPERSIST"
+       | Error e -> Alcotest.failf "HTTL: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "HSETEX + HGETEX" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:hsetex" in
+      let _ = C.del c [ key ] in
+      (match C.hsetex c key ~ex_seconds:60 [ "a", "1"; "b", "2" ] with
+       | Ok true -> ()
+       | Ok false -> Alcotest.fail "HSETEX: returned false unexpectedly"
+       | Error e -> Alcotest.failf "HSETEX: %a" E.pp e);
+      (match C.httl c key [ "a" ] with
+       | Ok [ Expires_in n ] when n > 30 && n <= 60 -> ()
+       | Ok _ -> Alcotest.fail "expected Expires_in 30..60"
+       | Error e -> Alcotest.failf "HTTL: %a" E.pp e);
+      (match C.hgetex c key ~ttl:Hge_persist [ "a"; "missing" ] with
+       | Ok [ Some "1"; None ] -> ()
+       | Ok _ -> Alcotest.fail "HGETEX unexpected"
+       | Error e -> Alcotest.failf "HGETEX: %a" E.pp e);
+      (match C.httl c key [ "a" ] with
+       | Ok [ Persistent ] -> ()
+       | Ok _ -> Alcotest.fail "field should be persistent after HGETEX PERSIST"
+       | Error e -> Alcotest.failf "HTTL: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "HEXPIRE with 0 sec triggers immediate expiry" `Quick
+      (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:hftl0" in
+      let _ = C.del c [ key ] in
+      ignore (C.hset c key [ "f", "v" ]);
+      (match C.hexpire c key ~seconds:0 [ "f" ] with
+       | Ok [ Hfield_expired_now ] -> ()
+       | Ok _ -> Alcotest.fail "expected Hfield_expired_now"
+       | Error e -> Alcotest.failf "HEXPIRE 0: %a" E.pp e);
+      (* field should be gone now *)
+      (match C.hget c key "f" with
+       | Ok None -> ()
+       | Ok (Some s) -> Alcotest.failf "expected None, got Some %S" s
+       | Error e -> Alcotest.failf "HGET: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
     Alcotest.test_case "HINCRBY" `Quick (fun () ->
       with_client @@ fun c ->
       let key = "ocaml:c:h4" in

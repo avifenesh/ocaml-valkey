@@ -297,3 +297,152 @@ let hgetall ?timeout ?read_from t key =
 let hincrby ?timeout t key field delta =
   int64_of_reply "HINCRBY"
     (exec ?timeout t [| "HINCRBY"; key; field; string_of_int delta |])
+
+(* ---------- hash field TTL (Valkey 9+) ---------- *)
+
+type hexpire_cond = H_nx | H_xx | H_gt | H_lt
+
+let string_of_hexpire_cond = function
+  | H_nx -> "NX"
+  | H_xx -> "XX"
+  | H_gt -> "GT"
+  | H_lt -> "LT"
+
+type field_ttl_set =
+  | Hfield_missing
+  | Hfield_condition_failed
+  | Hfield_ttl_set
+  | Hfield_expired_now
+
+let decode_field_ttl_set = function
+  | -2L -> Hfield_missing
+  | 0L -> Hfield_condition_failed
+  | 1L -> Hfield_ttl_set
+  | 2L -> Hfield_expired_now
+  | n ->
+      (* Future-proof: unknown code → report as condition_failed is wrong;
+         raise as protocol violation at the caller layer. *)
+      ignore n; Hfield_condition_failed
+
+let ints_per_field cmd decoder = function
+  | Ok (Resp3.Array items) ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | Resp3.Integer n :: rest -> loop (decoder n :: acc) rest
+        | other :: _ -> Error (protocol_violation cmd other)
+      in
+      loop [] items
+  | Ok v -> Error (protocol_violation cmd v)
+  | Error e -> Error e
+
+let hexpire_args cmd ?cond key unit_arg fields =
+  let cond_args = match cond with
+    | None -> []
+    | Some c -> [ string_of_hexpire_cond c ]
+  in
+  let nfields = string_of_int (List.length fields) in
+  Array.of_list
+    ([ cmd; key; unit_arg ] @ cond_args @ [ "FIELDS"; nfields ] @ fields)
+
+let hexpire ?timeout ?cond t key ~seconds fields =
+  let args = hexpire_args "HEXPIRE" ?cond key (string_of_int seconds) fields in
+  ints_per_field "HEXPIRE" decode_field_ttl_set (exec ?timeout t args)
+
+let hpexpire ?timeout ?cond t key ~millis fields =
+  let args = hexpire_args "HPEXPIRE" ?cond key (string_of_int millis) fields in
+  ints_per_field "HPEXPIRE" decode_field_ttl_set (exec ?timeout t args)
+
+let hexpireat ?timeout ?cond t key ~at_unix_seconds fields =
+  let args = hexpire_args "HEXPIREAT" ?cond key (string_of_int at_unix_seconds) fields in
+  ints_per_field "HEXPIREAT" decode_field_ttl_set (exec ?timeout t args)
+
+let hpexpireat ?timeout ?cond t key ~at_unix_millis fields =
+  let args = hexpire_args "HPEXPIREAT" ?cond key (string_of_int at_unix_millis) fields in
+  ints_per_field "HPEXPIREAT" decode_field_ttl_set (exec ?timeout t args)
+
+let decode_expiry = function
+  | -2L -> Absent
+  | -1L -> Persistent
+  | n -> Expires_in (Int64.to_int n)
+
+let httl_like cmd ?timeout ?read_from t key fields =
+  let nfields = string_of_int (List.length fields) in
+  let args = Array.of_list ([ cmd; key; "FIELDS"; nfields ] @ fields) in
+  ints_per_field cmd decode_expiry (exec ?timeout ?read_from t args)
+
+let httl ?timeout ?read_from t key fields =
+  httl_like "HTTL" ?timeout ?read_from t key fields
+
+let hpttl ?timeout ?read_from t key fields =
+  httl_like "HPTTL" ?timeout ?read_from t key fields
+
+let hexpiretime ?timeout ?read_from t key fields =
+  httl_like "HEXPIRETIME" ?timeout ?read_from t key fields
+
+let hpexpiretime ?timeout ?read_from t key fields =
+  httl_like "HPEXPIRETIME" ?timeout ?read_from t key fields
+
+type field_persist =
+  | Persist_field_missing
+  | Persist_had_no_ttl
+  | Persist_ttl_removed
+
+let decode_persist = function
+  | -2L -> Persist_field_missing
+  | -1L -> Persist_had_no_ttl
+  | 1L -> Persist_ttl_removed
+  | _ -> Persist_had_no_ttl   (* future-proof fallback *)
+
+let hpersist ?timeout t key fields =
+  let nfields = string_of_int (List.length fields) in
+  let args =
+    Array.of_list ([ "HPERSIST"; key; "FIELDS"; nfields ] @ fields)
+  in
+  ints_per_field "HPERSIST" decode_persist (exec ?timeout t args)
+
+type hgetex_ttl =
+  | Hge_no_change
+  | Hge_ex_seconds of int
+  | Hge_px_millis of int
+  | Hge_exat_unix_seconds of int
+  | Hge_pxat_unix_millis of int
+  | Hge_persist
+
+let hgetex ?timeout t key ~ttl fields =
+  let ttl_args = match ttl with
+    | Hge_no_change -> []
+    | Hge_ex_seconds n -> [ "EX"; string_of_int n ]
+    | Hge_px_millis n -> [ "PX"; string_of_int n ]
+    | Hge_exat_unix_seconds n -> [ "EXAT"; string_of_int n ]
+    | Hge_pxat_unix_millis n -> [ "PXAT"; string_of_int n ]
+    | Hge_persist -> [ "PERSIST" ]
+  in
+  let nfields = string_of_int (List.length fields) in
+  let args =
+    Array.of_list
+      ([ "HGETEX"; key ] @ ttl_args @ [ "FIELDS"; nfields ] @ fields)
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | Resp3.Null :: rest -> loop (None :: acc) rest
+        | Resp3.Bulk_string s :: rest -> loop (Some s :: acc) rest
+        | other :: _ -> Error (protocol_violation "HGETEX element" other)
+      in
+      loop [] items
+  | Ok v -> Error (protocol_violation "HGETEX" v)
+
+let hsetex ?timeout ?ex_seconds t key fvs =
+  let ex_args = match ex_seconds with
+    | None -> []
+    | Some n -> [ "EX"; string_of_int n ]
+  in
+  let nfields = string_of_int (List.length fvs) in
+  let pairs = List.concat_map (fun (f, v) -> [ f; v ]) fvs in
+  let args =
+    Array.of_list
+      ([ "HSETEX"; key ] @ ex_args @ [ "FIELDS"; nfields ] @ pairs)
+  in
+  bool_from_integer "HSETEX" (exec ?timeout t args)

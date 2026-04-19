@@ -187,3 +187,96 @@ val hgetall :
 val hincrby :
   ?timeout:float ->
   t -> string -> string -> int -> (int64, Connection.Error.t) result
+
+(** {1 Hash field TTL (Valkey 9+)} *)
+
+type hexpire_cond = H_nx | H_xx | H_gt | H_lt
+
+type field_ttl_set =
+  | Hfield_missing          (** -2: no such field / no such key *)
+  | Hfield_condition_failed (** 0: [cond] modifier prevented the write *)
+  | Hfield_ttl_set          (** 1: expiration applied *)
+  | Hfield_expired_now      (** 2: zero-second TTL caused immediate deletion *)
+
+val hexpire :
+  ?timeout:float ->
+  ?cond:hexpire_cond ->
+  t -> string -> seconds:int -> string list ->
+  (field_ttl_set list, Connection.Error.t) result
+
+val hpexpire :
+  ?timeout:float ->
+  ?cond:hexpire_cond ->
+  t -> string -> millis:int -> string list ->
+  (field_ttl_set list, Connection.Error.t) result
+
+val hexpireat :
+  ?timeout:float ->
+  ?cond:hexpire_cond ->
+  t -> string -> at_unix_seconds:int -> string list ->
+  (field_ttl_set list, Connection.Error.t) result
+
+val hpexpireat :
+  ?timeout:float ->
+  ?cond:hexpire_cond ->
+  t -> string -> at_unix_millis:int -> string list ->
+  (field_ttl_set list, Connection.Error.t) result
+
+val httl :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string list ->
+  (expiry_state list, Connection.Error.t) result
+
+val hpttl :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string list ->
+  (expiry_state list, Connection.Error.t) result
+
+val hexpiretime :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string list ->
+  (expiry_state list, Connection.Error.t) result
+(** Replies are absolute Unix-seconds (when field expires), not remaining.
+    Uses [Expires_in] constructor with absolute-time interpretation. *)
+
+val hpexpiretime :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string list ->
+  (expiry_state list, Connection.Error.t) result
+
+type field_persist =
+  | Persist_field_missing   (** -2 *)
+  | Persist_had_no_ttl      (** -1 *)
+  | Persist_ttl_removed     (** 1 *)
+
+val hpersist :
+  ?timeout:float ->
+  t -> string -> string list ->
+  (field_persist list, Connection.Error.t) result
+
+(** HGETEX simplified: one TTL modifier at a time. Pass [None] for
+    plain get. *)
+type hgetex_ttl =
+  | Hge_no_change
+  | Hge_ex_seconds of int
+  | Hge_px_millis of int
+  | Hge_exat_unix_seconds of int
+  | Hge_pxat_unix_millis of int
+  | Hge_persist
+
+val hgetex :
+  ?timeout:float ->
+  t -> string -> ttl:hgetex_ttl -> string list ->
+  (string option list, Connection.Error.t) result
+
+val hsetex :
+  ?timeout:float ->
+  ?ex_seconds:int ->
+  t -> string -> (string * string) list ->
+  (bool, Connection.Error.t) result
+(** Returns [true] on success, [false] if an [FNX]/[FXX] condition blocked
+    the write. Omitting [ex_seconds] writes without TTL. *)
