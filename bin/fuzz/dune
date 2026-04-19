@@ -1,0 +1,4 @@
+(executable
+ (name fuzz)
+ (public_name valkey-fuzz)
+ (libraries valkey eio_main))
