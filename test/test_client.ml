@@ -783,6 +783,97 @@ let tests =
             | Error e -> Format.asprintf "Error %a" E.pp e));
       let _ = C.del c [ key ] in
       ());
+    Alcotest.test_case "stream admin: XPENDING / XCLAIM / XAUTOCLAIM / XINFO"
+      `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:admin" in
+      let group = "g" in
+      let c1 = "alice" in
+      let c2 = "bob" in
+      let _ = C.del c [ key ] in
+      let _ =
+        match
+          C.xgroup_create c key ~group ~id:"0" ~opts:[ Xgroup_mkstream ]
+        with
+        | Ok () -> ()
+        | Error e -> Alcotest.failf "XGROUP CREATE: %a" E.pp e
+      in
+      let id =
+        match C.xadd c key [ "k", "v" ] with
+        | Ok s -> s | Error e -> Alcotest.failf "XADD: %a" E.pp e
+      in
+      (* Alice reads but doesn't ACK *)
+      let _ =
+        match C.xreadgroup c ~group ~consumer:c1 ~streams:[ key, ">" ] with
+        | Ok _ -> ()
+        | Error e -> Alcotest.failf "XREADGROUP: %a" E.pp e
+      in
+      (* XPENDING summary: 1 pending, alice has 1 *)
+      (match C.xpending c key ~group with
+       | Ok s ->
+           Alcotest.(check int) "count" 1 s.count;
+           Alcotest.(check (option string)) "min" (Some id) s.min_id;
+           Alcotest.(check (option string)) "max" (Some id) s.max_id;
+           (match s.consumers with
+            | [ (name, 1) ] when name = c1 -> ()
+            | _ -> Alcotest.fail "consumers shape unexpected")
+       | Error e -> Alcotest.failf "XPENDING: %a" E.pp e);
+      (* XPENDING range *)
+      (match
+         C.xpending_range c key ~group ~start:"-" ~end_:"+" ~count:10
+       with
+       | Ok [ e ] ->
+           Alcotest.(check string) "entry id" id e.id;
+           Alcotest.(check string) "entry consumer" c1 e.consumer
+       | Ok xs ->
+           Alcotest.failf "expected 1 pending entry, got %d" (List.length xs)
+       | Error e -> Alcotest.failf "XPENDING range: %a" E.pp e);
+      (* XCLAIM to bob (min_idle_ms=0 so claim succeeds immediately) *)
+      (match
+         C.xclaim c key ~group ~consumer:c2 ~min_idle_ms:0 ~ids:[ id ]
+       with
+       | Ok [ e ] ->
+           Alcotest.(check string) "claimed id" id e.id;
+           Alcotest.(check (list (pair string string)))
+             "claimed fields" [ "k", "v" ] e.fields
+       | Ok xs ->
+           Alcotest.failf "XCLAIM: expected 1, got %d" (List.length xs)
+       | Error e -> Alcotest.failf "XCLAIM: %a" E.pp e);
+      (* XCLAIM JUSTID *)
+      (match
+         C.xclaim_ids c key ~group ~consumer:c1 ~min_idle_ms:0 ~ids:[ id ]
+       with
+       | Ok [ only_id ] -> Alcotest.(check string) "just-id" id only_id
+       | Ok ids ->
+           Alcotest.failf "XCLAIM JUSTID: expected 1 id, got %d"
+             (List.length ids)
+       | Error e -> Alcotest.failf "XCLAIM JUSTID: %a" E.pp e);
+      (* XAUTOCLAIM from cursor 0-0 *)
+      (match
+         C.xautoclaim c key ~group ~consumer:c2 ~min_idle_ms:0 ~cursor:"0-0"
+       with
+       | Ok r ->
+           (* Claimed list should contain our entry *)
+           let claimed_ids = List.map (fun (e : C.stream_entry) -> e.id) r.claimed in
+           Alcotest.(check bool) "autoclaim contains id" true
+             (List.mem id claimed_ids)
+       | Error e -> Alcotest.failf "XAUTOCLAIM: %a" E.pp e);
+      (* XINFO GROUPS returns at least one entry *)
+      (match C.xinfo_groups c key with
+       | Ok xs ->
+           Alcotest.(check bool) "at least one group" true (xs <> [])
+       | Error e -> Alcotest.failf "XINFO GROUPS: %a" E.pp e);
+      (* XINFO CONSUMERS returns at least one *)
+      (match C.xinfo_consumers c key ~group with
+       | Ok xs ->
+           Alcotest.(check bool) "at least one consumer" true (xs <> [])
+       | Error e -> Alcotest.failf "XINFO CONSUMERS: %a" E.pp e);
+      (* XINFO STREAM returns something parseable *)
+      (match C.xinfo_stream c key with
+       | Ok _ -> ()
+       | Error e -> Alcotest.failf "XINFO STREAM: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
     Alcotest.test_case "blocking: BLPOP / BRPOP with data ready" `Quick
       (fun () ->
       with_client @@ fun c ->

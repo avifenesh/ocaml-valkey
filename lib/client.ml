@@ -983,6 +983,248 @@ let xack ?timeout t key ~group ids =
   | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
   | Ok v -> Error (protocol_violation "XACK" v)
 
+(* ---------- stream admin ---------- *)
+
+type xpending_summary = {
+  count : int;
+  min_id : string option;
+  max_id : string option;
+  consumers : (string * int) list;
+}
+
+let extract_string_opt cmd = function
+  | Resp3.Null -> Ok None
+  | v -> (match extract_string cmd v with Ok s -> Ok (Some s) | Error e -> Error e)
+
+let parse_xpending_consumers cmd = function
+  | Resp3.Null -> Ok []
+  | Resp3.Array pairs ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | Resp3.Array [ name_v; count_v ] :: rest ->
+            (match
+               extract_string cmd name_v,
+               match count_v with
+               | Resp3.Integer n -> Ok (Int64.to_int n)
+               | Resp3.Bulk_string s ->
+                   (try Ok (int_of_string s) with _ -> Error (protocol_violation cmd count_v))
+               | _ -> Error (protocol_violation cmd count_v)
+             with
+             | Ok name, Ok n -> loop ((name, n) :: acc) rest
+             | Error e, _ | _, Error e -> Error e)
+        | other :: _ -> Error (protocol_violation cmd other)
+      in
+      loop [] pairs
+  | v -> Error (protocol_violation cmd v)
+
+let xpending ?timeout ?read_from t key ~group =
+  let cmd = "XPENDING" in
+  match exec ?timeout ?read_from t [| cmd; key; group |] with
+  | Error e -> Error e
+  | Ok (Resp3.Array [ count_v; min_v; max_v; consumers_v ]) ->
+      (match count_v with
+       | Resp3.Integer count ->
+           (match
+              extract_string_opt cmd min_v,
+              extract_string_opt cmd max_v,
+              parse_xpending_consumers cmd consumers_v
+            with
+            | Ok min_id, Ok max_id, Ok consumers ->
+                Ok
+                  { count = Int64.to_int count; min_id; max_id; consumers }
+            | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e)
+       | _ -> Error (protocol_violation cmd count_v))
+  | Ok v -> Error (protocol_violation cmd v)
+
+type xpending_entry = {
+  id : string;
+  consumer : string;
+  idle_ms : int;
+  delivery_count : int;
+}
+
+let xpending_range ?timeout ?read_from ?idle_ms ?consumer t key ~group
+    ~start ~end_ ~count =
+  let idle_a = match idle_ms with
+    | None -> []
+    | Some n -> [ "IDLE"; string_of_int n ]
+  in
+  let consumer_a = match consumer with
+    | None -> []
+    | Some c -> [ c ]
+  in
+  let args =
+    Array.of_list
+      ([ "XPENDING"; key; group ]
+       @ idle_a
+       @ [ start; end_; string_of_int count ]
+       @ consumer_a)
+  in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | Resp3.Array [ id_v; consumer_v; idle_v; delc_v ] :: rest ->
+            (match
+               extract_string "XPENDING id" id_v,
+               extract_string "XPENDING consumer" consumer_v,
+               (match idle_v with
+                | Resp3.Integer n -> Ok (Int64.to_int n)
+                | _ -> Error (protocol_violation "XPENDING idle" idle_v)),
+               (match delc_v with
+                | Resp3.Integer n -> Ok (Int64.to_int n)
+                | _ -> Error (protocol_violation "XPENDING delivery_count" delc_v))
+             with
+             | Ok id, Ok consumer, Ok idle_ms, Ok delivery_count ->
+                 loop
+                   ({ id; consumer; idle_ms; delivery_count } :: acc) rest
+             | Error e, _, _, _
+             | _, Error e, _, _
+             | _, _, Error e, _
+             | _, _, _, Error e -> Error e)
+        | other :: _ -> Error (protocol_violation "XPENDING entry" other)
+      in
+      loop [] items
+  | Ok v -> Error (protocol_violation "XPENDING range" v)
+
+let xclaim_args ?idle_ms ?time_unix_ms ?retry_count ?(force = false)
+    ?(justid = false) ~group ~consumer ~min_idle_ms ids =
+  let idle_a = match idle_ms with
+    | None -> []
+    | Some n -> [ "IDLE"; string_of_int n ]
+  in
+  let time_a = match time_unix_ms with
+    | None -> []
+    | Some n -> [ "TIME"; string_of_int n ]
+  in
+  let retry_a = match retry_count with
+    | None -> []
+    | Some n -> [ "RETRYCOUNT"; string_of_int n ]
+  in
+  let force_a = if force then [ "FORCE" ] else [] in
+  let justid_a = if justid then [ "JUSTID" ] else [] in
+  [ group; consumer; string_of_int min_idle_ms ] @ ids
+  @ idle_a @ time_a @ retry_a @ force_a @ justid_a
+
+let xclaim ?timeout ?idle_ms ?time_unix_ms ?retry_count ?force
+    t key ~group ~consumer ~min_idle_ms ~ids =
+  let tail =
+    xclaim_args ?idle_ms ?time_unix_ms ?retry_count ?force
+      ~group ~consumer ~min_idle_ms ids
+  in
+  let args = Array.of_list ([ "XCLAIM"; key ] @ tail) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) -> parse_entries "XCLAIM" items
+  | Ok v -> Error (protocol_violation "XCLAIM" v)
+
+let xclaim_ids ?timeout ?idle_ms ?time_unix_ms ?retry_count ?force
+    t key ~group ~consumer ~min_idle_ms ~ids =
+  let tail =
+    xclaim_args ?idle_ms ?time_unix_ms ?retry_count ?force ~justid:true
+      ~group ~consumer ~min_idle_ms ids
+  in
+  let args = Array.of_list ([ "XCLAIM"; key ] @ tail) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      strings_of_resp3_collection "XCLAIM JUSTID" items
+  | Ok v -> Error (protocol_violation "XCLAIM JUSTID" v)
+
+type xautoclaim_result = {
+  next_cursor : string;
+  claimed : stream_entry list;
+  deleted_ids : string list;
+}
+
+type xautoclaim_ids_result = {
+  next_cursor : string;
+  claimed_ids : string list;
+  deleted_ids : string list;
+}
+
+let xautoclaim_args ?count ?(justid = false) ~group ~consumer ~min_idle_ms
+    ~cursor () =
+  let count_a = match count with
+    | None -> []
+    | Some n -> [ "COUNT"; string_of_int n ]
+  in
+  let justid_a = if justid then [ "JUSTID" ] else [] in
+  [ group; consumer; string_of_int min_idle_ms; cursor ] @ count_a @ justid_a
+
+let xautoclaim ?timeout ?count t key ~group ~consumer ~min_idle_ms ~cursor =
+  let tail = xautoclaim_args ?count ~group ~consumer ~min_idle_ms ~cursor () in
+  let args = Array.of_list ([ "XAUTOCLAIM"; key ] @ tail) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array [ cursor_v; claimed_v; deleted_v ]) ->
+      (match extract_string "XAUTOCLAIM cursor" cursor_v with
+       | Error e -> Error e
+       | Ok next_cursor ->
+           let claimed_r =
+             match claimed_v with
+             | Resp3.Array items -> parse_entries "XAUTOCLAIM claimed" items
+             | _ -> Error (protocol_violation "XAUTOCLAIM claimed" claimed_v)
+           in
+           let deleted_r =
+             match deleted_v with
+             | Resp3.Array items ->
+                 strings_of_resp3_collection "XAUTOCLAIM deleted" items
+             | _ -> Error (protocol_violation "XAUTOCLAIM deleted" deleted_v)
+           in
+           (match claimed_r, deleted_r with
+            | Ok claimed, Ok deleted_ids ->
+                Ok { next_cursor; claimed; deleted_ids }
+            | Error e, _ | _, Error e -> Error e))
+  | Ok v -> Error (protocol_violation "XAUTOCLAIM" v)
+
+let xautoclaim_ids ?timeout ?count t key ~group ~consumer ~min_idle_ms ~cursor =
+  let tail =
+    xautoclaim_args ?count ~justid:true ~group ~consumer ~min_idle_ms ~cursor ()
+  in
+  let args = Array.of_list ([ "XAUTOCLAIM"; key ] @ tail) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array [ cursor_v; claimed_v; deleted_v ]) ->
+      (match extract_string "XAUTOCLAIM cursor" cursor_v with
+       | Error e -> Error e
+       | Ok next_cursor ->
+           let claimed_r =
+             match claimed_v with
+             | Resp3.Array items ->
+                 strings_of_resp3_collection "XAUTOCLAIM JUSTID claimed" items
+             | _ ->
+                 Error (protocol_violation "XAUTOCLAIM JUSTID claimed" claimed_v)
+           in
+           let deleted_r =
+             match deleted_v with
+             | Resp3.Array items ->
+                 strings_of_resp3_collection "XAUTOCLAIM JUSTID deleted" items
+             | _ ->
+                 Error (protocol_violation "XAUTOCLAIM JUSTID deleted" deleted_v)
+           in
+           (match claimed_r, deleted_r with
+            | Ok claimed_ids, Ok deleted_ids ->
+                Ok { next_cursor; claimed_ids; deleted_ids }
+            | Error e, _ | _, Error e -> Error e))
+  | Ok v -> Error (protocol_violation "XAUTOCLAIM JUSTID" v)
+
+let xinfo_stream ?timeout ?read_from t key =
+  exec ?timeout ?read_from t [| "XINFO"; "STREAM"; key |]
+
+let xinfo_groups ?timeout ?read_from t key =
+  match exec ?timeout ?read_from t [| "XINFO"; "GROUPS"; key |] with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) -> Ok items
+  | Ok v -> Error (protocol_violation "XINFO GROUPS" v)
+
+let xinfo_consumers ?timeout ?read_from t key ~group =
+  match exec ?timeout ?read_from t [| "XINFO"; "CONSUMERS"; key; group |] with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) -> Ok items
+  | Ok v -> Error (protocol_violation "XINFO CONSUMERS" v)
+
 (* ---------- blocking commands ----------
    Caller is responsible for using a dedicated Client. Typed here for
    ergonomics; typing does not make multiplexed use safe. *)

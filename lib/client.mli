@@ -561,6 +561,101 @@ val xack :
   t -> string -> group:string -> string list ->
   (int, Connection.Error.t) result
 
+(** {2 Stream admin (XPENDING / XCLAIM / XAUTOCLAIM / XINFO)} *)
+
+type xpending_summary = {
+  count : int;
+  min_id : string option;       (** [None] iff [count] is 0. *)
+  max_id : string option;
+  consumers : (string * int) list;  (** consumer -> pending count *)
+}
+
+val xpending :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> group:string ->
+  (xpending_summary, Connection.Error.t) result
+
+type xpending_entry = {
+  id : string;
+  consumer : string;
+  idle_ms : int;
+  delivery_count : int;
+}
+
+val xpending_range :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  ?idle_ms:int ->
+  ?consumer:string ->
+  t -> string -> group:string ->
+  start:string -> end_:string -> count:int ->
+  (xpending_entry list, Connection.Error.t) result
+
+val xclaim :
+  ?timeout:float ->
+  ?idle_ms:int ->
+  ?time_unix_ms:int ->
+  ?retry_count:int ->
+  ?force:bool ->
+  t -> string -> group:string -> consumer:string ->
+  min_idle_ms:int -> ids:string list ->
+  (stream_entry list, Connection.Error.t) result
+
+val xclaim_ids :
+  ?timeout:float ->
+  ?idle_ms:int ->
+  ?time_unix_ms:int ->
+  ?retry_count:int ->
+  ?force:bool ->
+  t -> string -> group:string -> consumer:string ->
+  min_idle_ms:int -> ids:string list ->
+  (string list, Connection.Error.t) result
+(** XCLAIM with JUSTID — returns only the IDs of claimed entries. *)
+
+type xautoclaim_result = {
+  next_cursor : string;           (** ["0-0"] signals end of scan. *)
+  claimed : stream_entry list;
+  deleted_ids : string list;
+}
+
+val xautoclaim :
+  ?timeout:float ->
+  ?count:int ->
+  t -> string -> group:string -> consumer:string ->
+  min_idle_ms:int -> cursor:string ->
+  (xautoclaim_result, Connection.Error.t) result
+
+type xautoclaim_ids_result = {
+  next_cursor : string;
+  claimed_ids : string list;
+  deleted_ids : string list;
+}
+
+val xautoclaim_ids :
+  ?timeout:float ->
+  ?count:int ->
+  t -> string -> group:string -> consumer:string ->
+  min_idle_ms:int -> cursor:string ->
+  (xautoclaim_ids_result, Connection.Error.t) result
+
+val xinfo_stream :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> (Resp3.t, Connection.Error.t) result
+(** Returns the raw reply — shape is rich, varies by server version, and
+    includes nested stream entries. Users decode what they need. *)
+
+val xinfo_groups :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> (Resp3.t list, Connection.Error.t) result
+
+val xinfo_consumers :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> group:string -> (Resp3.t list, Connection.Error.t) result
+
 (** {1 Blocking commands}
 
     Open a DEDICATED [Client.t] for these. Sending a blocking command
