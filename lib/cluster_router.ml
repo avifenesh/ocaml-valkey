@@ -181,13 +181,34 @@ let make_exec ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
         (match Node_pool.connections pool with
          | [] -> err_terminal "cluster has no live connections"
          | c :: _ -> send_once ?timeout c args)
-    | Router.Target.All_nodes | Router.Target.All_primaries ->
-        err_terminal "cluster router: fan-out targets not yet implemented"
     | Router.Target.By_channel _ ->
         err_terminal "cluster router: sharded pub/sub not yet implemented"
   in
   handle_retries ~pool ~topology_ref ~clock ~max_redirects
     ~trigger_refresh ?timeout ~dispatch args
+
+(* Fan a single command out to every node in the selected set. Each
+   query runs in its own fiber; a per-node failure never collapses the
+   whole batch — it comes back as [Error _] in that node's slot. *)
+let make_exec_multi ~pool ~topology_ref ?timeout
+    (fan : Router.Fan_target.t) (args : string array) =
+  let topology = !topology_ref in
+  let nodes =
+    match fan with
+    | Router.Fan_target.All_nodes -> Topology.all_nodes topology
+    | Router.Fan_target.All_primaries -> Topology.primaries topology
+    | Router.Fan_target.All_replicas -> Topology.replicas topology
+  in
+  let dispatch_one (n : Topology.Node.t) =
+    match Node_pool.get pool n.id with
+    | None ->
+        (n.id,
+         Error (Connection.Error.Terminal
+                  (Printf.sprintf "no live connection for node %s" n.id)))
+    | Some conn ->
+        (n.id, send_once ?timeout conn args)
+  in
+  Eio.Fiber.List.map dispatch_one nodes
 
 let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
   let topology_ref = ref topology in
@@ -196,11 +217,14 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
     make_exec ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
       ?timeout target rf args
   in
+  let exec_multi ?timeout fan args =
+    make_exec_multi ~pool ~topology_ref ?timeout fan args
+  in
   let close () = Node_pool.close_all pool in
   let primary () =
     match Node_pool.connections pool with [] -> None | c :: _ -> Some c
   in
-  Router.make ~exec ~close ~primary
+  Router.make ~exec ~exec_multi ~close ~primary
 
 (* ---------- refresh fiber ---------- *)
 
@@ -352,13 +376,18 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
             ~topology_atomic ~refresh_signal ~refresh_mutex ~closing ());
       let topology_ref = ref topology in
       let trigger_refresh () = Eio.Condition.broadcast refresh_signal in
+      let sync_ref () = topology_ref := Atomic.get topology_atomic in
       let exec ?timeout target rf args =
         (* Thread the atomic's latest value through the existing ref-based
            dispatch. On refresh the ref is re-synced. *)
-        topology_ref := Atomic.get topology_atomic;
+        sync_ref ();
         make_exec ~pool ~topology_ref ~clock
           ~max_redirects:cfg.max_redirects ~trigger_refresh
           ?timeout target rf args
+      in
+      let exec_multi ?timeout fan args =
+        sync_ref ();
+        make_exec_multi ~pool ~topology_ref ?timeout fan args
       in
       let close () =
         Atomic.set closing true;
@@ -370,4 +399,4 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
         | [] -> None
         | c :: _ -> Some c
       in
-      Ok (Router.make ~exec ~close ~primary)
+      Ok (Router.make ~exec ~exec_multi ~close ~primary)

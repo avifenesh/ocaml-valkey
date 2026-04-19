@@ -12,20 +12,39 @@ module Read_from : sig
 end
 
 module Target : sig
+  (** Where to send a single-reply command.
+
+      Fan-out (every primary / every node) is a separate concern: it
+      returns one reply per node, not one reply total. See [Fan_target]
+      and [exec_multi]. *)
   type t =
     | Random
-    | All_nodes
-    | All_primaries
     | By_slot of int
     | By_node of string
     | By_channel of string
 end
 
+module Fan_target : sig
+  (** Which subset of the cluster to fan a command out to. *)
+  type t =
+    | All_nodes
+    | All_primaries
+    | All_replicas
+end
+
 type t
 
+type exec_fn =
+  ?timeout:float -> Target.t -> Read_from.t -> string array ->
+  (Resp3.t, Connection.Error.t) result
+
+type exec_multi_fn =
+  ?timeout:float -> Fan_target.t -> string array ->
+  (string * (Resp3.t, Connection.Error.t) result) list
+
 val make :
-  exec:(?timeout:float -> Target.t -> Read_from.t -> string array ->
-        (Resp3.t, Connection.Error.t) result) ->
+  exec:exec_fn ->
+  exec_multi:exec_multi_fn ->
   close:(unit -> unit) ->
   primary:(unit -> Connection.t option) ->
   t
@@ -35,6 +54,15 @@ val standalone : Connection.t -> t
 val exec :
   ?timeout:float -> t -> Target.t -> Read_from.t -> string array ->
   (Resp3.t, Connection.Error.t) result
+
+val exec_multi :
+  ?timeout:float -> t -> Fan_target.t -> string array ->
+  (string * (Resp3.t, Connection.Error.t) result) list
+(** Send [args] to every node in the fan-out set in parallel.
+    Returns one [(node_id, result)] pair per node, in unspecified order.
+
+    On a standalone router (cluster-of-one), this returns a single-entry
+    list for all fan targets — the one node is both primary and full set. *)
 
 val close : t -> unit
 
