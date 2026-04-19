@@ -35,6 +35,14 @@ dune build || fail "build failed"
 section "test suite"
 dune runtest --force || fail "tests failed"
 
+# Parser fuzzer: no external deps, fast, catches regressions that
+# let malformed wire bytes escape as anything other than Parse_error
+# or End_of_stream. 100 k iterations is ~1 s.
+section "parser fuzz (100k inputs, strict)"
+dune exec bin/fuzz_parser/fuzz_parser.exe -- \
+  --iterations 100000 --strict \
+  || fail "parser fuzzer reported unexpected exceptions"
+
 if [ "${SKIP_FUZZ:-}" = "1" ]; then
   echo "pre-push: SKIP_FUZZ=1, skipping fuzz" >&2
   exit 0

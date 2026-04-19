@@ -1,0 +1,4 @@
+(executable
+ (name fuzz_parser)
+ (public_name valkey-fuzz-parser)
+ (libraries valkey))
