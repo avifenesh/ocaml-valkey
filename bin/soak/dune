@@ -1,0 +1,4 @@
+(executable
+ (name soak)
+ (public_name valkey-soak)
+ (libraries valkey eio_main unix))
