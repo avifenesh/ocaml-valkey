@@ -1534,3 +1534,176 @@ let xreadgroup_block ?timeout ?count ?(noack = false) t
   match exec ?timeout ~target t args with
   | Error e -> Error e
   | Ok v -> parse_streams_reply "XREADGROUP BLOCK" v
+
+(* ---------- bitmaps ---------- *)
+
+type bit_range_unit = Byte | Bit
+
+let bit_unit_arg = function Byte -> "BYTE" | Bit -> "BIT"
+
+type bit_range =
+  | From of int
+  | From_to of { start : int; end_ : int }
+  | From_to_unit of { start : int; end_ : int; unit : bit_range_unit }
+
+let bit_range_args = function
+  | None -> []
+  | Some (From n) -> [ string_of_int n ]
+  | Some (From_to { start; end_ }) ->
+      [ string_of_int start; string_of_int end_ ]
+  | Some (From_to_unit { start; end_; unit }) ->
+      [ string_of_int start; string_of_int end_; bit_unit_arg unit ]
+
+type bit = B0 | B1
+
+let bit_arg = function B0 -> "0" | B1 -> "1"
+
+let bit_of_integer cmd = function
+  | Ok (Resp3.Integer 0L) -> Ok B0
+  | Ok (Resp3.Integer 1L) -> Ok B1
+  | Ok v -> Error (protocol_violation cmd v)
+  | Error e -> Error e
+
+let bitcount ?timeout ?read_from ?range t key =
+  let args =
+    Array.of_list ("BITCOUNT" :: key :: bit_range_args range)
+  in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "BITCOUNT" v)
+
+let bitpos ?timeout ?read_from ?range t key ~bit =
+  let args =
+    Array.of_list
+      ("BITPOS" :: key :: bit_arg bit :: bit_range_args range)
+  in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "BITPOS" v)
+
+type bitop =
+  | Bitop_and of string list
+  | Bitop_or of string list
+  | Bitop_xor of string list
+  | Bitop_not of string
+
+let bitop_args = function
+  | Bitop_and sources -> "AND", sources
+  | Bitop_or sources -> "OR", sources
+  | Bitop_xor sources -> "XOR", sources
+  | Bitop_not source -> "NOT", [ source ]
+
+let bitop ?timeout t op ~destination =
+  let op_arg, sources = bitop_args op in
+  let args =
+    Array.of_list ("BITOP" :: op_arg :: destination :: sources)
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "BITOP" v)
+
+let setbit ?timeout t key ~offset ~value =
+  let args = [| "SETBIT"; key; string_of_int offset; bit_arg value |] in
+  bit_of_integer "SETBIT" (exec ?timeout t args)
+
+let getbit ?timeout ?read_from t key ~offset =
+  let args = [| "GETBIT"; key; string_of_int offset |] in
+  bit_of_integer "GETBIT" (exec ?timeout ?read_from t args)
+
+type bitfield_type = Signed of int | Unsigned of int
+
+let bitfield_type_arg = function
+  | Signed n -> Printf.sprintf "i%d" n
+  | Unsigned n -> Printf.sprintf "u%d" n
+
+type bitfield_offset = Bit_offset of int | Scaled_offset of int
+
+let bitfield_offset_arg = function
+  | Bit_offset n -> string_of_int n
+  | Scaled_offset n -> Printf.sprintf "#%d" n
+
+type bitfield_overflow = Wrap | Sat | Fail
+
+let bitfield_overflow_arg = function
+  | Wrap -> "WRAP"
+  | Sat -> "SAT"
+  | Fail -> "FAIL"
+
+type bitfield_op =
+  | Get of { ty : bitfield_type; at : bitfield_offset }
+  | Set of { ty : bitfield_type; at : bitfield_offset; value : int64 }
+  | Incrby of
+      { ty : bitfield_type; at : bitfield_offset; increment : int64 }
+  | Overflow of bitfield_overflow
+
+(* Whether this op contributes an element to the reply array.
+   Every server-side reply maps 1:1 with a non-[Overflow] op. *)
+let op_produces_reply = function
+  | Overflow _ -> false
+  | Get _ | Set _ | Incrby _ -> true
+
+let bitfield_op_args = function
+  | Get { ty; at } ->
+      [ "GET"; bitfield_type_arg ty; bitfield_offset_arg at ]
+  | Set { ty; at; value } ->
+      [ "SET"; bitfield_type_arg ty; bitfield_offset_arg at;
+        Int64.to_string value ]
+  | Incrby { ty; at; increment } ->
+      [ "INCRBY"; bitfield_type_arg ty; bitfield_offset_arg at;
+        Int64.to_string increment ]
+  | Overflow o ->
+      [ "OVERFLOW"; bitfield_overflow_arg o ]
+
+let decode_bitfield_element = function
+  | Resp3.Integer n -> Ok (Some n)
+  | Resp3.Null -> Ok None
+  | v -> Error (protocol_violation "BITFIELD" v)
+
+let bitfield ?timeout t key ops =
+  let arg_chunks = List.concat_map bitfield_op_args ops in
+  let args = Array.of_list ("BITFIELD" :: key :: arg_chunks) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      (* Only ops that produce a reply are matched against [items];
+         [Overflow] modifiers are pure prefix state on the wire. *)
+      let expected = List.filter op_produces_reply ops in
+      let rec zip ops items acc =
+        match ops, items with
+        | [], [] -> Ok (List.rev acc)
+        | _ :: ops_rest, v :: items_rest ->
+            (match decode_bitfield_element v with
+             | Error e -> Error e
+             | Ok x -> zip ops_rest items_rest (x :: acc))
+        | _ ->
+            Error
+              (Connection.Error.Protocol_violation
+                 (Printf.sprintf
+                    "BITFIELD: %d reply elements for %d ops"
+                    (List.length items)
+                    (List.length expected)))
+      in
+      zip expected items []
+  | Ok v -> Error (protocol_violation "BITFIELD" v)
+
+let bitfield_ro ?timeout ?read_from t key ~gets =
+  let arg_chunks =
+    List.concat_map
+      (fun (ty, at) ->
+        [ "GET"; bitfield_type_arg ty; bitfield_offset_arg at ])
+      gets
+  in
+  let args = Array.of_list ("BITFIELD_RO" :: key :: arg_chunks) in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | Resp3.Integer n :: rest -> loop (n :: acc) rest
+        | v :: _ -> Error (protocol_violation "BITFIELD_RO" v)
+      in
+      loop [] items
+  | Ok v -> Error (protocol_violation "BITFIELD_RO" v)

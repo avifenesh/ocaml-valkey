@@ -13,6 +13,7 @@ let () =
       "transaction (needs docker valkey :6379)", Test_transaction.tests;
       "pubsub (needs docker valkey :6379)", Test_pubsub.tests;
       "named_commands (needs docker valkey :6379)", Test_named_commands.tests;
+      "bitmap (needs docker valkey :6379)", Test_bitmap.tests;
       "cluster (needs docker compose -f docker-compose.cluster.yml)",
         Test_cluster.tests;
     ]

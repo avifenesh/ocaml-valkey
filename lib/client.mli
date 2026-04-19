@@ -823,3 +823,118 @@ val xreadgroup_block :
   t -> block_ms:int -> group:string -> consumer:string ->
   streams:(string * string) list ->
   ((string * stream_entry list) list, Connection.Error.t) result
+
+(** {1 Bitmaps} *)
+
+(** Range unit for [BITCOUNT] / [BITPOS]: whether [start] and [end]
+    are measured in bytes or in individual bits. BYTE | BIT modifier
+    is a Valkey 7.0+ feature; omit when talking to older servers. *)
+type bit_range_unit = Byte | Bit
+
+(** Range modifier for [BITCOUNT] / [BITPOS].
+
+    - [From start] — Valkey 8.0+. Defaults [end] to the last byte.
+    - [From_to { start; end_ }] — the classic form; unit defaults to
+      [Byte] on the server.
+    - [From_to_unit { start; end_; unit }] — explicit unit (Valkey 7.0+).
+
+    Negative indices work like [GETRANGE]: [-1] is the last byte/bit. *)
+type bit_range =
+  | From of int
+  | From_to of { start : int; end_ : int }
+  | From_to_unit of { start : int; end_ : int; unit : bit_range_unit }
+
+val bitcount :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  ?range:bit_range ->
+  t -> string -> (int, Connection.Error.t) result
+(** [BITCOUNT key [start [end [BYTE | BIT]]]]. Integer reply: the
+    number of set bits. Returns [0] for a non-existent key. *)
+
+(** Target bit value for [BITPOS]. *)
+type bit = B0 | B1
+
+val bitpos :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  ?range:bit_range ->
+  t -> string -> bit:bit -> (int, Connection.Error.t) result
+(** [BITPOS key bit [start [end [BYTE | BIT]]]]. Returns the position
+    of the first matching bit, or [-1] when not found.
+
+    Range-elision detail per Valkey docs: when searching for [B0] and
+    the range is unbounded on the right, the server treats the string
+    as zero-padded beyond its actual length — which can yield a
+    position past end-of-string. Specifying an explicit [end] forces
+    strict "no clear bit in range" semantics that return [-1]. *)
+
+(** [BITOP] operator + sources. Each constructor enforces the source
+    arity documented by Valkey: AND/OR/XOR take one or more source
+    keys; NOT (bitwise inversion) takes exactly one. *)
+type bitop =
+  | Bitop_and of string list
+  | Bitop_or of string list
+  | Bitop_xor of string list
+  | Bitop_not of string
+
+val bitop :
+  ?timeout:float ->
+  t -> bitop -> destination:string ->
+  (int, Connection.Error.t) result
+(** [BITOP op destination source...]. Integer reply: the size in
+    bytes of the destination string (equal to the longest source).
+    In cluster mode, [destination] and every source must hash to
+    the same slot (hashtags); otherwise the server returns
+    [CROSSSLOT]. *)
+
+val setbit :
+  ?timeout:float ->
+  t -> string -> offset:int -> value:bit ->
+  (bit, Connection.Error.t) result
+(** [SETBIT key offset value]. Returns the previous bit value. *)
+
+val getbit :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> offset:int ->
+  (bit, Connection.Error.t) result
+(** [GETBIT key offset]. *)
+
+(** Integer type descriptor for [BITFIELD]. [Signed n] means
+    [iN]; [Unsigned n] means [uN]. Valkey supports signed widths
+    1..64 and unsigned widths 1..63. *)
+type bitfield_type = Signed of int | Unsigned of int
+
+(** Offset into the bit-string. [Bit n] is an absolute bit offset
+    (no prefix on the wire); [Scaled n] is [n] type-widths from
+    the start (wire prefix [#]). *)
+type bitfield_offset = Bit_offset of int | Scaled_offset of int
+
+type bitfield_overflow = Wrap | Sat | Fail
+
+(** One BITFIELD sub-operation. [Overflow] has no reply; every
+    other variant contributes one element to the response. *)
+type bitfield_op =
+  | Get of { ty : bitfield_type; at : bitfield_offset }
+  | Set of { ty : bitfield_type; at : bitfield_offset; value : int64 }
+  | Incrby of
+      { ty : bitfield_type; at : bitfield_offset; increment : int64 }
+  | Overflow of bitfield_overflow
+
+val bitfield :
+  ?timeout:float ->
+  t -> string -> bitfield_op list ->
+  (int64 option list, Connection.Error.t) result
+(** [BITFIELD key ops...]. Returns one reply per [Get] / [Set] /
+    [Incrby] op, in order — [Overflow] modifiers produce no reply.
+    An [Incrby] under [Overflow Fail] returns [None] on overflow;
+    other replies are [Some _]. *)
+
+val bitfield_ro :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> gets:(bitfield_type * bitfield_offset) list ->
+  (int64 list, Connection.Error.t) result
+(** [BITFIELD_RO key GET ...]. Read-only subset of [BITFIELD];
+    only [GET] operations are accepted. *)
