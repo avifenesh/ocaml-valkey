@@ -256,13 +256,7 @@ Override knobs:
 
 ## Roadmap
 
-Scope for next sessions, roughly in order:
-
-1. Polish & publish to opam.
-2. Larger-scale bench matrix on real hardware (not WSL), document expected ratios on Linux bare-metal.
-3. AZ-affinity verification against a real multi-AZ ElastiCache deployment.
-4. Property-based tests over `Command_spec` (every spec entry's `By_slot` actually routes to a node that owns that slot in a live cluster).
-5. Additional typed commands for the long tail users ask for (driven by what turns up).
+See [ROADMAP.md](ROADMAP.md) for the full plan — client-side caching, module support (JSON / Search / Bloom), cluster-aware batch commands, IAM auth, connection pooling, OpenTelemetry, mTLS, opam release, proper benchmarks + coverage + fuzz-in-CI, examples, and the rest.
 
 ## License
 
