@@ -40,3 +40,23 @@ val from_pool_and_topology :
     the standalone-as-one-shard-cluster code path, where the pool
     already contains the single connection and the topology is
     synthetic. *)
+
+module For_testing : sig
+  (** Not part of the public API. Exposed so the retry state machine
+      can be driven from unit tests without standing up a real pool. *)
+
+  val handle_retries :
+    pool:Node_pool.t ->
+    topology_ref:Topology.t ref ->
+    clock:_ Eio.Time.clock ->
+    max_redirects:int ->
+    trigger_refresh:(unit -> unit) ->
+    ?timeout:float ->
+    dispatch:(unit -> (Resp3.t, Connection.Error.t) result) ->
+    string array ->
+    (Resp3.t, Connection.Error.t) result
+
+  val clusterdown_backoff_for_attempt : int -> float
+  val tryagain_backoff : float
+  val conn_lost_backoff : float
+end

@@ -494,3 +494,10 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
       in
       Ok (Router.make ~exec ~exec_multi ~close ~primary
             ~connection_for_slot ~endpoint_for_slot)
+
+module For_testing = struct
+  let handle_retries = handle_retries
+  let clusterdown_backoff_for_attempt = clusterdown_backoff_for_attempt
+  let tryagain_backoff = tryagain_backoff
+  let conn_lost_backoff = conn_lost_backoff
+end
