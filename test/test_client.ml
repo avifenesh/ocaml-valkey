@@ -783,6 +783,76 @@ let tests =
             | Error e -> Format.asprintf "Error %a" E.pp e));
       let _ = C.del c [ key ] in
       ());
+    Alcotest.test_case "blocking: BLPOP / BRPOP with data ready" `Quick
+      (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:block:l" in
+      let _ = C.del c [ key ] in
+      ignore (C.rpush c key [ "a"; "b"; "c" ]);
+      (match C.blpop c ~keys:[ key ] ~block_seconds:0.1 with
+       | Ok (Some (k, v)) ->
+           Alcotest.(check string) "key" key k;
+           Alcotest.(check string) "popped left" "a" v
+       | Ok None -> Alcotest.fail "BLPOP unexpectedly timed out"
+       | Error e -> Alcotest.failf "BLPOP: %a" E.pp e);
+      (match C.brpop c ~keys:[ key ] ~block_seconds:0.1 with
+       | Ok (Some (k, v)) ->
+           Alcotest.(check string) "key" key k;
+           Alcotest.(check string) "popped right" "c" v
+       | Ok None -> Alcotest.fail "BRPOP unexpectedly timed out"
+       | Error e -> Alcotest.failf "BRPOP: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "blocking: BLPOP timeout on empty" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:block:empty" in
+      let _ = C.del c [ key ] in
+      (match C.blpop c ~keys:[ key ] ~block_seconds:0.1 with
+       | Ok None -> ()
+       | Ok (Some (_, _)) -> Alcotest.fail "BLPOP should have timed out"
+       | Error e -> Alcotest.failf "BLPOP: %a" E.pp e));
+    Alcotest.test_case "LMOVE / BLMOVE with data" `Quick (fun () ->
+      with_client @@ fun c ->
+      let src = "ocaml:c:src" in
+      let dst = "ocaml:c:dst" in
+      let _ = C.del c [ src; dst ] in
+      ignore (C.rpush c src [ "x"; "y"; "z" ]);
+      (match C.lmove c ~source:src ~destination:dst ~from:Left ~to_:Right with
+       | Ok (Some "x") -> ()
+       | other -> Alcotest.failf "LMOVE: %s"
+           (match other with
+            | Ok None -> "None"
+            | Ok (Some s) -> Printf.sprintf "Some %S" s
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      (match
+         C.blmove c ~source:src ~destination:dst
+           ~from:Right ~to_:Left ~block_seconds:0.1
+       with
+       | Ok (Some "z") -> ()
+       | other -> Alcotest.failf "BLMOVE: %s"
+           (match other with
+            | Ok None -> "None"
+            | Ok (Some s) -> Printf.sprintf "Some %S" s
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      let _ = C.del c [ src; dst ] in
+      ());
+    Alcotest.test_case "WAIT (no replicas)" `Quick (fun () ->
+      with_client @@ fun c ->
+      (* With no configured replicas, WAIT 0 0 returns 0 instantly. *)
+      (match C.wait_replicas c ~num_replicas:0 ~block_ms:100 with
+       | Ok 0 -> ()
+       | Ok n -> Alcotest.failf "WAIT: expected 0, got %d" n
+       | Error e -> Alcotest.failf "WAIT: %a" E.pp e));
+    Alcotest.test_case "XREAD BLOCK timeout on empty stream" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:xread:empty" in
+      let _ = C.del c [ key ] in
+      (match
+         C.xread_block c ~block_ms:100 ~streams:[ key, "$" ]
+       with
+       | Ok [] -> ()
+       | Ok _ -> Alcotest.fail "XREAD BLOCK should have timed out"
+       | Error e -> Alcotest.failf "XREAD BLOCK: %a" E.pp e));
     Alcotest.test_case "HINCRBY" `Quick (fun () ->
       with_client @@ fun c ->
       let key = "ocaml:c:h4" in

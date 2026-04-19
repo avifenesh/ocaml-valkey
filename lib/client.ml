@@ -982,3 +982,105 @@ let xack ?timeout t key ~group ids =
   | Error e -> Error e
   | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
   | Ok v -> Error (protocol_violation "XACK" v)
+
+(* ---------- blocking commands ----------
+   Caller is responsible for using a dedicated Client. Typed here for
+   ergonomics; typing does not make multiplexed use safe. *)
+
+type list_side = Left | Right
+let string_of_side = function Left -> "LEFT" | Right -> "RIGHT"
+
+let lmove ?timeout t ~source ~destination ~from ~to_ =
+  let args =
+    [| "LMOVE"; source; destination;
+       string_of_side from; string_of_side to_ |]
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok Resp3.Null -> Ok None
+  | Ok (Resp3.Bulk_string s) -> Ok (Some s)
+  | Ok v -> Error (protocol_violation "LMOVE" v)
+
+let parse_blpop_reply cmd = function
+  | Resp3.Null -> Ok None
+  | Resp3.Array [ k_v; v_v ] ->
+      (match extract_string cmd k_v, extract_string cmd v_v with
+       | Ok k, Ok v -> Ok (Some (k, v))
+       | Error e, _ | _, Error e -> Error e)
+  | v -> Error (protocol_violation cmd v)
+
+let blpop_like cmd ?timeout t ~keys ~block_seconds =
+  let args =
+    Array.of_list
+      (cmd :: keys @ [ Printf.sprintf "%g" block_seconds ])
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok v -> parse_blpop_reply cmd v
+
+let blpop ?timeout t ~keys ~block_seconds =
+  blpop_like "BLPOP" ?timeout t ~keys ~block_seconds
+
+let brpop ?timeout t ~keys ~block_seconds =
+  blpop_like "BRPOP" ?timeout t ~keys ~block_seconds
+
+let blmove ?timeout t ~source ~destination ~from ~to_ ~block_seconds =
+  let args =
+    [| "BLMOVE"; source; destination;
+       string_of_side from; string_of_side to_;
+       Printf.sprintf "%g" block_seconds |]
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok Resp3.Null -> Ok None
+  | Ok (Resp3.Bulk_string s) -> Ok (Some s)
+  | Ok v -> Error (protocol_violation "BLMOVE" v)
+
+let wait_replicas ?timeout t ~num_replicas ~block_ms =
+  match
+    exec ?timeout t
+      [| "WAIT"; string_of_int num_replicas; string_of_int block_ms |]
+  with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "WAIT" v)
+
+let xread_block ?timeout ?count t ~block_ms ~streams =
+  let count_a = match count with
+    | None -> []
+    | Some n -> [ "COUNT"; string_of_int n ]
+  in
+  let keys = List.map fst streams in
+  let ids = List.map snd streams in
+  let args =
+    Array.of_list (
+      [ "XREAD" ] @ count_a
+      @ [ "BLOCK"; string_of_int block_ms ]
+      @ [ "STREAMS" ] @ keys @ ids
+    )
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok v -> parse_streams_reply "XREAD BLOCK" v
+
+let xreadgroup_block ?timeout ?count ?(noack = false) t
+    ~block_ms ~group ~consumer ~streams =
+  let count_a = match count with
+    | None -> []
+    | Some n -> [ "COUNT"; string_of_int n ]
+  in
+  let noack_a = if noack then [ "NOACK" ] else [] in
+  let keys = List.map fst streams in
+  let ids = List.map snd streams in
+  let args =
+    Array.of_list (
+      [ "XREADGROUP"; "GROUP"; group; consumer ]
+      @ count_a
+      @ [ "BLOCK"; string_of_int block_ms ]
+      @ noack_a
+      @ [ "STREAMS" ] @ keys @ ids
+    )
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok v -> parse_streams_reply "XREADGROUP BLOCK" v

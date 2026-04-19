@@ -560,3 +560,64 @@ val xack :
   ?timeout:float ->
   t -> string -> group:string -> string list ->
   (int, Connection.Error.t) result
+
+(** {1 Blocking commands}
+
+    Open a DEDICATED [Client.t] for these. Sending a blocking command
+    on the Client you use for normal traffic stalls every other fiber
+    sharing that socket until the block resolves.
+
+    Our multiplexed design does not auto-switch connections for blocking
+    calls. Typed commands here are safe to call only on a Client scoped
+    to blocking use. *)
+
+type list_side = Left | Right
+
+val lmove :
+  ?timeout:float ->
+  t -> source:string -> destination:string ->
+  from:list_side -> to_:list_side -> (string option, Connection.Error.t) result
+(** Atomic non-blocking LMOVE. Included alongside [blmove] since they
+    share [list_side]. *)
+
+val blpop :
+  ?timeout:float ->
+  t -> keys:string list -> block_seconds:float ->
+  ((string * string) option, Connection.Error.t) result
+(** [Some (key, value)] or [None] on server-side timeout.
+    [block_seconds = 0.] blocks indefinitely — in that case set
+    [?timeout] or cancel the Client's switch to get out. *)
+
+val brpop :
+  ?timeout:float ->
+  t -> keys:string list -> block_seconds:float ->
+  ((string * string) option, Connection.Error.t) result
+
+val blmove :
+  ?timeout:float ->
+  t -> source:string -> destination:string ->
+  from:list_side -> to_:list_side -> block_seconds:float ->
+  (string option, Connection.Error.t) result
+
+val wait_replicas :
+  ?timeout:float ->
+  t -> num_replicas:int -> block_ms:int ->
+  (int, Connection.Error.t) result
+(** WAIT. Returns number of replicas that acknowledged.
+    [block_ms = 0] blocks indefinitely. *)
+
+val xread_block :
+  ?timeout:float ->
+  ?count:int ->
+  t -> block_ms:int ->
+  streams:(string * string) list ->
+  ((string * stream_entry list) list, Connection.Error.t) result
+(** Blocking XREAD. On server-side timeout returns an empty list. *)
+
+val xreadgroup_block :
+  ?timeout:float ->
+  ?count:int ->
+  ?noack:bool ->
+  t -> block_ms:int -> group:string -> consumer:string ->
+  streams:(string * string) list ->
+  ((string * stream_entry list) list, Connection.Error.t) result
