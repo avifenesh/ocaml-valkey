@@ -318,4 +318,90 @@ let tests =
     Alcotest.test_case "SET IFEQ (needs Valkey 8.1+)" `Quick test_set_ifeq;
     Alcotest.test_case "DELIFEQ (needs Valkey 9+)" `Quick test_delifeq;
     Alcotest.test_case "SET ... GET variant" `Quick test_set_and_get;
+    Alcotest.test_case "HSET / HGET / HDEL" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:h1" in
+      let _ = C.del c [ key ] in
+      (match C.hset c key [ "a", "1"; "b", "2" ] with
+       | Ok 2 -> ()
+       | other ->
+           Alcotest.failf "HSET: %s"
+             (match other with
+              | Ok n -> string_of_int n
+              | Error e -> Format.asprintf "Error %a" E.pp e));
+      (match C.hget c key "a" with
+       | Ok (Some "1") -> ()
+       | other ->
+           Alcotest.failf "HGET: %s"
+             (match other with
+              | Ok None -> "None"
+              | Ok (Some s) -> Printf.sprintf "Some %S" s
+              | Error e -> Format.asprintf "Error %a" E.pp e));
+      (match C.hget c key "nope" with
+       | Ok None -> ()
+       | other -> Alcotest.failf "HGET missing should be None (%s)"
+           (match other with
+            | Ok (Some s) -> Printf.sprintf "Some %S" s
+            | Ok None -> "impossible"
+            | Error e -> Format.asprintf "Error %a" E.pp e));
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "HGETALL" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:h2" in
+      let _ = C.del c [ key ] in
+      ignore (C.hset c key [ "x", "1"; "y", "2" ]);
+      (match C.hgetall c key with
+       | Ok kvs ->
+           let sorted =
+             List.sort (fun (a, _) (b, _) -> compare a b) kvs
+           in
+           Alcotest.(check (list (pair string string)))
+             "hgetall sorted"
+             [ "x", "1"; "y", "2" ] sorted
+       | Error e -> Alcotest.failf "HGETALL: %a" E.pp e);
+      (match C.hgetall c "ocaml:c:h_missing" with
+       | Ok [] -> ()
+       | Ok xs ->
+           Alcotest.failf "HGETALL on missing: expected [], got %d items"
+             (List.length xs)
+       | Error e -> Alcotest.failf "HGETALL missing: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "HMGET mixed" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:h3" in
+      let _ = C.del c [ key ] in
+      ignore (C.hset c key [ "a", "A"; "c", "C" ]);
+      (match C.hmget c key [ "a"; "b"; "c" ] with
+       | Ok [ Some "A"; None; Some "C" ] -> ()
+       | other ->
+           Alcotest.failf "HMGET unexpected: %s"
+             (match other with
+              | Ok vs ->
+                  "["
+                  ^ String.concat "; "
+                      (List.map (function
+                         | None -> "None"
+                         | Some s -> Printf.sprintf "Some %S" s)
+                         vs)
+                  ^ "]"
+              | Error e -> Format.asprintf "Error %a" E.pp e));
+      let _ = C.del c [ key ] in
+      ());
+    Alcotest.test_case "HINCRBY" `Quick (fun () ->
+      with_client @@ fun c ->
+      let key = "ocaml:c:h4" in
+      let _ = C.del c [ key ] in
+      Alcotest.(check int64) "first +1" 1L
+        (match C.hincrby c key "n" 1 with
+         | Ok n -> n | Error e -> Alcotest.failf "HINCRBY: %a" E.pp e);
+      Alcotest.(check int64) "then +10" 11L
+        (match C.hincrby c key "n" 10 with
+         | Ok n -> n | Error e -> Alcotest.failf "HINCRBY: %a" E.pp e);
+      Alcotest.(check int64) "then -5" 6L
+        (match C.hincrby c key "n" (-5) with
+         | Ok n -> n | Error e -> Alcotest.failf "HINCRBY: %a" E.pp e);
+      let _ = C.del c [ key ] in
+      ());
   ]

@@ -161,3 +161,29 @@ val incr :
 val incrby :
   ?timeout:float ->
   t -> string -> int -> (int64, Connection.Error.t) result
+
+(** {1 Hashes} *)
+
+val hget :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string -> (string option, Connection.Error.t) result
+
+val hset :
+  ?timeout:float ->
+  t -> string -> (string * string) list -> (int, Connection.Error.t) result
+(** Returns the number of fields that were newly added (not updated). *)
+
+val hmget :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string list -> (string option list, Connection.Error.t) result
+
+val hgetall :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> ((string * string) list, Connection.Error.t) result
+
+val hincrby :
+  ?timeout:float ->
+  t -> string -> string -> int -> (int64, Connection.Error.t) result

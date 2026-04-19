@@ -228,3 +228,72 @@ let incr ?timeout t key =
 let incrby ?timeout t key delta =
   int64_of_reply "INCRBY"
     (exec ?timeout t [| "INCRBY"; key; string_of_int delta |])
+
+(* ---------- hashes ---------- *)
+
+let hget ?timeout ?read_from t key field =
+  match exec ?timeout ?read_from t [| "HGET"; key; field |] with
+  | Error e -> Error e
+  | Ok v -> string_option_of_reply "HGET" v
+
+let hset ?timeout t key fvs =
+  let pairs = List.concat_map (fun (f, v) -> [ f; v ]) fvs in
+  let args = Array.of_list ("HSET" :: key :: pairs) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "HSET" v)
+
+let hmget ?timeout ?read_from t key fields =
+  let args = Array.of_list ("HMGET" :: key :: fields) in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      let rec convert acc = function
+        | [] -> Ok (List.rev acc)
+        | Resp3.Null :: rest -> convert (None :: acc) rest
+        | Resp3.Bulk_string s :: rest -> convert (Some s :: acc) rest
+        | other :: _ -> Error (protocol_violation "HMGET element" other)
+      in
+      convert [] items
+  | Ok v -> Error (protocol_violation "HMGET" v)
+
+let extract_string cmd = function
+  | Resp3.Bulk_string s -> Ok s
+  | Resp3.Simple_string s -> Ok s
+  | v -> Error (protocol_violation cmd v)
+
+let hgetall ?timeout ?read_from t key =
+  match exec ?timeout ?read_from t [| "HGETALL"; key |] with
+  | Error e -> Error e
+  | Ok (Resp3.Map kvs) ->
+      let rec convert acc = function
+        | [] -> Ok (List.rev acc)
+        | (k, v) :: rest ->
+            (match extract_string "HGETALL key" k with
+             | Error e -> Error e
+             | Ok k' ->
+                 (match extract_string "HGETALL value" v with
+                  | Error e -> Error e
+                  | Ok v' -> convert ((k', v') :: acc) rest))
+      in
+      convert [] kvs
+  | Ok (Resp3.Array items) ->
+      (* Defensive: some proxies translate RESP3 Map into flat Array. *)
+      let rec convert acc = function
+        | [] -> Ok (List.rev acc)
+        | [ _ ] -> Error (protocol_violation "HGETALL" (Resp3.Array items))
+        | k :: v :: rest ->
+            (match extract_string "HGETALL key" k with
+             | Error e -> Error e
+             | Ok k' ->
+                 (match extract_string "HGETALL value" v with
+                  | Error e -> Error e
+                  | Ok v' -> convert ((k', v') :: acc) rest))
+      in
+      convert [] items
+  | Ok v -> Error (protocol_violation "HGETALL" v)
+
+let hincrby ?timeout t key field delta =
+  int64_of_reply "HINCRBY"
+    (exec ?timeout t [| "HINCRBY"; key; field; string_of_int delta |])
