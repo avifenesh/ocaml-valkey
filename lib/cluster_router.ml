@@ -97,36 +97,79 @@ let err_terminal fmt =
     (fun s -> Error (Connection.Error.Terminal s))
     fmt
 
-let make_exec ~pool ~topology_ref ?timeout (target : Router.Target.t)
-    (rf : Router.Read_from.t) (args : string array) =
-  let topology = !topology_ref in
-  match target with
-  | Router.Target.By_slot slot ->
-      (match Topology.shard_for_slot topology slot with
-       | None -> err_protocol "no shard owns slot %d" slot
-       | Some shard ->
-           let node = pick_node_by_read_from rf shard in
-           (match Node_pool.get pool node.id with
-            | None ->
-                err_terminal "no live connection for node %s" node.id
-            | Some conn -> Connection.request ?timeout conn args))
-  | Router.Target.By_node node_id ->
-      (match Node_pool.get pool node_id with
-       | None -> err_terminal "unknown node %s" node_id
-       | Some conn -> Connection.request ?timeout conn args)
-  | Router.Target.Random ->
-      (match Node_pool.connections pool with
-       | [] -> err_terminal "cluster has no live connections"
-       | c :: _ -> Connection.request ?timeout c args)
-  | Router.Target.All_nodes | Router.Target.All_primaries ->
-      err_terminal "cluster router: fan-out targets not yet implemented"
-  | Router.Target.By_channel _ ->
-      err_terminal "cluster router: sharded pub/sub not yet implemented"
+(* Execute [args] once against [conn]. Used for both the initial dispatch
+   and retries after a redirect. *)
+let send_once ?timeout conn args = Connection.request ?timeout conn args
 
-let from_pool_and_topology ~pool ~topology =
+let handle_redirect ~pool ~topology_ref ~max_redirects
+    ?timeout first_result args =
+  let rec loop attempt result =
+    match result with
+    | Ok _ -> result
+    | Error (Connection.Error.Server_error ve) when attempt < max_redirects ->
+        (match Redirect.of_valkey_error ve with
+         | None -> result
+         | Some { kind; host; port; _ } ->
+             (match
+                Topology.find_node_by_address !topology_ref ~host ~port
+              with
+              | None ->
+                  (* Unknown address — future work: trigger topology
+                     refresh, retry. For now surface the error. *)
+                  result
+              | Some node ->
+                  (match Node_pool.get pool node.id with
+                   | None -> result
+                   | Some conn ->
+                       (* For ASK, send ASKING before the original. For
+                          MOVED, just retry on the new node. *)
+                       (match kind with
+                        | Redirect.Ask ->
+                            (match send_once ?timeout conn [| "ASKING" |] with
+                             | Ok _ -> ()
+                             | Error _ -> ());
+                        | Redirect.Moved -> ());
+                       let next = send_once ?timeout conn args in
+                       loop (attempt + 1) next)))
+    | Error _ -> result
+  in
+  loop 0 first_result
+
+let make_exec ~pool ~topology_ref ~max_redirects ?timeout
+    (target : Router.Target.t) (rf : Router.Read_from.t)
+    (args : string array) =
+  let topology = !topology_ref in
+  let dispatch_initial () =
+    match target with
+    | Router.Target.By_slot slot ->
+        (match Topology.shard_for_slot topology slot with
+         | None -> err_protocol "no shard owns slot %d" slot
+         | Some shard ->
+             let node = pick_node_by_read_from rf shard in
+             (match Node_pool.get pool node.id with
+              | None ->
+                  err_terminal "no live connection for node %s" node.id
+              | Some conn -> send_once ?timeout conn args))
+    | Router.Target.By_node node_id ->
+        (match Node_pool.get pool node_id with
+         | None -> err_terminal "unknown node %s" node_id
+         | Some conn -> send_once ?timeout conn args)
+    | Router.Target.Random ->
+        (match Node_pool.connections pool with
+         | [] -> err_terminal "cluster has no live connections"
+         | c :: _ -> send_once ?timeout c args)
+    | Router.Target.All_nodes | Router.Target.All_primaries ->
+        err_terminal "cluster router: fan-out targets not yet implemented"
+    | Router.Target.By_channel _ ->
+        err_terminal "cluster router: sharded pub/sub not yet implemented"
+  in
+  handle_redirect ~pool ~topology_ref ~max_redirects ?timeout
+    (dispatch_initial ()) args
+
+let from_pool_and_topology ?(max_redirects = 5) ~pool ~topology () =
   let topology_ref = ref topology in
   let exec ?timeout target rf args =
-    make_exec ~pool ~topology_ref ?timeout target rf args
+    make_exec ~pool ~topology_ref ~max_redirects ?timeout target rf args
   in
   let close () = Node_pool.close_all pool in
   let primary () =
@@ -151,4 +194,5 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
           ~prefer_hostname:cfg.prefer_hostname
           topology
       in
-      Ok (from_pool_and_topology ~pool ~topology)
+      Ok (from_pool_and_topology ~max_redirects:cfg.max_redirects
+            ~pool ~topology ())

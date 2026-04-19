@@ -317,3 +317,20 @@ let single_primary ~host ~port ?tls_port ?availability_zone () =
     }
   in
   of_shards [ shard ]
+
+let find_node_by_address t ~host ~port =
+  let matches (n : Node.t) =
+    let host_match =
+      List.exists (fun opt ->
+          match opt with
+          | Some s -> s = host && s <> "" && s <> "?"
+          | None -> false)
+        [ n.ip; n.hostname; n.endpoint ]
+    in
+    let port_match =
+      (match n.port with Some p -> p = port | None -> false)
+      || (match n.tls_port with Some p -> p = port | None -> false)
+    in
+    host_match && port_match
+  in
+  List.find_opt matches (all_nodes t)

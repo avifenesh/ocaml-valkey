@@ -27,8 +27,10 @@ val create :
   (Router.t, string) result
 
 val from_pool_and_topology :
+  ?max_redirects:int ->
   pool:Node_pool.t ->
   topology:Topology.t ->
+  unit ->
   Router.t
 (** Wrap an existing pool + topology as a Router. Used internally for
     the standalone-as-one-shard-cluster code path, where the pool

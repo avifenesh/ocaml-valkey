@@ -6,6 +6,7 @@ let () =
       "slot", Test_slot.tests;
       "topology", Test_topology.tests;
       "discovery", Test_discovery.tests;
+      "redirect", Test_redirect.tests;
       "connection (needs docker valkey :6379)", Test_connection.tests;
       "client (needs docker valkey :6379)", Test_client.tests;
     ]

@@ -77,6 +77,9 @@ val single_primary :
   ?availability_zone:string ->
   unit ->
   t
-(** A one-shard, one-node topology owning all 16384 slots. For
-    standalone mode: treats the server as a degenerate cluster so the
-    same router dispatches both cases. *)
+
+val find_node_by_address : t -> host:string -> port:int -> Node.t option
+(** Scan the topology for a node whose address matches. Checks
+    [ip], [endpoint], and [hostname] fields against [host], and
+    [port] / [tls_port] against [port]. Used to resolve MOVED/ASK
+    redirects back to a known [node_id]. *)
