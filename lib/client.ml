@@ -1037,7 +1037,18 @@ let parse_streams_reply cmd = function
       loop [] kvs
   | v -> Error (protocol_violation cmd v)
 
-let xread ?timeout ?count t ~streams =
+(* XREAD / XREADGROUP place their key list after a STREAMS keyword,
+   so a static key-index spec cannot find them. These wrappers
+   compute the slot from the first stream key and pass the target
+   explicitly. Multi-stream calls in cluster require all stream keys
+   to hash to the same slot (hashtags); the server rejects otherwise
+   as CROSSSLOT. *)
+let target_of_streams streams =
+  match streams with
+  | [] -> Target.Random
+  | (first_key, _) :: _ -> Target.By_slot (Slot.of_key first_key)
+
+let xread ?timeout ?read_from ?count t ~streams =
   let count_a = match count with
     | None -> []
     | Some n -> [ "COUNT"; string_of_int n ]
@@ -1049,7 +1060,8 @@ let xread ?timeout ?count t ~streams =
       [ "XREAD" ] @ count_a @ [ "STREAMS" ] @ keys @ ids
     )
   in
-  match exec ?timeout t args with
+  let target = target_of_streams streams in
+  match exec ?timeout ~target ?read_from t args with
   | Error e -> Error e
   | Ok v -> parse_streams_reply "XREAD" v
 
@@ -1094,7 +1106,8 @@ let xreadgroup ?timeout ?count ?(noack = false) t ~group ~consumer ~streams =
       @ [ "STREAMS" ] @ keys @ ids
     )
   in
-  match exec ?timeout t args with
+  let target = target_of_streams streams in
+  match exec ?timeout ~target t args with
   | Error e -> Error e
   | Ok v -> parse_streams_reply "XREADGROUP" v
 
@@ -1400,6 +1413,22 @@ let blmove ?timeout t ~source ~destination ~from ~to_ ~block_seconds =
   | Ok (Resp3.Bulk_string s) -> Ok (Some s)
   | Ok v -> Error (protocol_violation "BLMOVE" v)
 
+(* WAIT semantics diverge between standalone and cluster:
+
+   - Standalone: a single primary acks; [wait_replicas] returns the
+     count of its replicas that replied.
+   - Cluster: each primary has its own replicas. A WAIT on one
+     connection only says something about one shard's durability.
+
+   We expose the full per-primary view ([wait_replicas_all]) and
+   two standard aggregations ([wait_replicas_min],
+   [wait_replicas_sum]) so the API makes the choice explicit
+   instead of hiding a policy inside one function.
+
+   "Wait for the first primary to reach [num_replicas] and cancel
+   the rest" is a separate shape — it needs fiber cancellation in
+   exec_multi. Deferred. *)
+
 let wait_replicas ?timeout t ~num_replicas ~block_ms =
   match
     exec ?timeout t
@@ -1409,7 +1438,33 @@ let wait_replicas ?timeout t ~num_replicas ~block_ms =
   | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
   | Ok v -> Error (protocol_violation "WAIT" v)
 
-let xread_block ?timeout ?count t ~block_ms ~streams =
+let wait_replicas_all ?timeout t ~num_replicas ~block_ms =
+  let per_node =
+    exec_multi ?timeout ~fan:Router.Fan_target.All_primaries t
+      [| "WAIT"; string_of_int num_replicas; string_of_int block_ms |]
+  in
+  let rec loop acc = function
+    | [] -> Ok (List.rev acc)
+    | (_, Error e) :: _ -> Error e
+    | (node_id, Ok (Resp3.Integer n)) :: rest ->
+        loop ((node_id, Int64.to_int n) :: acc) rest
+    | (_, Ok v) :: _ -> Error (protocol_violation "WAIT" v)
+  in
+  loop [] per_node
+
+let wait_replicas_min ?timeout t ~num_replicas ~block_ms =
+  match wait_replicas_all ?timeout t ~num_replicas ~block_ms with
+  | Error e -> Error e
+  | Ok [] -> Ok 0
+  | Ok ((_, n0) :: rest) ->
+      Ok (List.fold_left (fun acc (_, n) -> min acc n) n0 rest)
+
+let wait_replicas_sum ?timeout t ~num_replicas ~block_ms =
+  match wait_replicas_all ?timeout t ~num_replicas ~block_ms with
+  | Error e -> Error e
+  | Ok xs -> Ok (List.fold_left (fun acc (_, n) -> acc + n) 0 xs)
+
+let xread_block ?timeout ?read_from ?count t ~block_ms ~streams =
   let count_a = match count with
     | None -> []
     | Some n -> [ "COUNT"; string_of_int n ]
@@ -1423,7 +1478,8 @@ let xread_block ?timeout ?count t ~block_ms ~streams =
       @ [ "STREAMS" ] @ keys @ ids
     )
   in
-  match exec ?timeout t args with
+  let target = target_of_streams streams in
+  match exec ?timeout ~target ?read_from t args with
   | Error e -> Error e
   | Ok v -> parse_streams_reply "XREAD BLOCK" v
 
@@ -1445,6 +1501,7 @@ let xreadgroup_block ?timeout ?count ?(noack = false) t
       @ [ "STREAMS" ] @ keys @ ids
     )
   in
-  match exec ?timeout t args with
+  let target = target_of_streams streams in
+  match exec ?timeout ~target t args with
   | Error e -> Error e
   | Ok v -> parse_streams_reply "XREADGROUP BLOCK" v

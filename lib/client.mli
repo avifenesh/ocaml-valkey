@@ -545,9 +545,13 @@ val xtrim :
 
 val xread :
   ?timeout:float ->
+  ?read_from:Read_from.t ->
   ?count:int ->
   t -> streams:(string * string) list ->
   ((string * stream_entry list) list, Connection.Error.t) result
+(** Non-blocking XREAD. In cluster mode, all stream keys must hash
+    to the same slot (colocate with hashtags) or the server
+    returns CROSSSLOT. The slot is computed from the first key. *)
 
 type xgroup_create_option =
   | Xgroup_mkstream
@@ -713,16 +717,50 @@ val wait_replicas :
   ?timeout:float ->
   t -> num_replicas:int -> block_ms:int ->
   (int, Connection.Error.t) result
-(** WAIT. Returns number of replicas that acknowledged.
-    [block_ms = 0] blocks indefinitely. *)
+(** [WAIT] against a single primary: on standalone, the one node;
+    on cluster, a random primary. Returns the replica count that
+    acknowledged on that one primary. [block_ms = 0] blocks
+    indefinitely.
+
+    In cluster mode this only tells you about one shard. Use the
+    [_all] / [_min] / [_sum] variants below to reason about the
+    cluster as a whole. *)
+
+val wait_replicas_all :
+  ?timeout:float ->
+  t -> num_replicas:int -> block_ms:int ->
+  ((string * int) list, Connection.Error.t) result
+(** Fan [WAIT] to every primary. Returns one [(primary_id, ack_count)]
+    entry per shard, preserving the raw view so the caller picks the
+    aggregation policy. On standalone, a one-entry list. *)
+
+val wait_replicas_min :
+  ?timeout:float ->
+  t -> num_replicas:int -> block_ms:int ->
+  (int, Connection.Error.t) result
+(** Fan [WAIT] and return the minimum ack count across all primaries
+    — "at least this many replicas everywhere". The natural
+    global-durability aggregation. Returns [0] on a cluster with no
+    primaries (which cannot happen outside a pathological refresh). *)
+
+val wait_replicas_sum :
+  ?timeout:float ->
+  t -> num_replicas:int -> block_ms:int ->
+  (int, Connection.Error.t) result
+(** Fan [WAIT] and return the sum of ack counts across primaries.
+    Rarely what you want — replicas of different primaries are not
+    interchangeable. Provided for completeness. *)
 
 val xread_block :
   ?timeout:float ->
+  ?read_from:Read_from.t ->
   ?count:int ->
   t -> block_ms:int ->
   streams:(string * string) list ->
   ((string * stream_entry list) list, Connection.Error.t) result
-(** Blocking XREAD. On server-side timeout returns an empty list. *)
+(** Blocking XREAD. On server-side timeout returns an empty list.
+    Same cluster rule as [xread]: all stream keys must hash to the
+    same slot. *)
 
 val xreadgroup_block :
   ?timeout:float ->
