@@ -220,9 +220,15 @@ let build_slot_map shards =
     shards;
   m
 
+(* Topology identity is about routing: who owns which slots, at
+   which address, in which role/health. It deliberately excludes
+   [replication_offset] — that is a per-moment data-progress number
+   that advances constantly on a healthy replicated primary, so
+   including it would make every [CLUSTER SHARDS] query from each
+   seed disagree and no quorum could ever form. *)
 let serialize_node (n : Node.t) =
   Printf.sprintf
-    "id=%s;role=%s;health=%s;ip=%s;host=%s;port=%s;tls=%s;ep=%s;az=%s;ro=%Ld"
+    "id=%s;role=%s;health=%s;ip=%s;host=%s;port=%s;tls=%s;ep=%s;az=%s"
     n.id
     (Node.role_to_string n.role)
     (Node.health_to_string n.health)
@@ -232,7 +238,6 @@ let serialize_node (n : Node.t) =
     (Option.fold n.tls_port ~none:"" ~some:string_of_int)
     (Option.value n.endpoint ~default:"")
     (Option.value n.availability_zone ~default:"")
-    n.replication_offset
 
 let serialize_shard (s : Shard.t) =
   let slots =
