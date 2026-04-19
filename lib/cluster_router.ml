@@ -320,7 +320,10 @@ let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
     (fun id ->
       if not (List.mem id new_ids) then
         match Node_pool.remove pool id with
-        | Some c -> (try Connection.close c with _ -> ())
+        | Some c ->
+            (try Connection.close c
+             with Eio.Io _ | End_of_file | Invalid_argument _
+                | Unix.Unix_error _ -> ())
         | None -> ())
     old_ids;
   (* Add new (online nodes only) *)

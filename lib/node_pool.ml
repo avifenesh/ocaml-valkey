@@ -39,7 +39,10 @@ let close_all t =
         l)
   in
   List.iter
-    (fun c -> try Connection.close c with _ -> ())
+    (fun c ->
+      try Connection.close c
+      with Eio.Io _ | End_of_file | Invalid_argument _
+         | Unix.Unix_error _ -> ())
     to_close
 
 let size t =

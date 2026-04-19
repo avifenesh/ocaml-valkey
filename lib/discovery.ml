@@ -59,7 +59,9 @@ let query_seed ~sw ~net ~clock ?domain_mgr ?connection_config (host, port) =
              | Error _ -> None)
         | Error _ -> None
       in
-      (try Connection.close c with _ -> ());
+      (try Connection.close c
+       with Eio.Io _ | End_of_file | Invalid_argument _
+          | Unix.Unix_error _ -> ());
       topo
 
 let discover_from_seeds ~sw ~net ~clock ?domain_mgr ?connection_config

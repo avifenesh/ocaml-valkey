@@ -419,12 +419,16 @@ let make_tcp_connector ~sw ~net ~host ~port ~tls =
                in
                let write cs = Eio.Flow.write tcp [ cs ] in
                let read_into buf = Eio.Flow.single_read tcp buf in
-               let close () = try Eio.Resource.close tcp with _ -> () in
+               let close () = try Eio.Resource.close tcp
+               with Eio.Io _ | End_of_file | Invalid_argument _
+                  | Unix.Unix_error _ -> () in
                Ok { write; reader; read_into; close }
            | Some tls_cfg ->
                (match wrap_with_tls ~tls_cfg tcp with
                 | Error e ->
-                    (try Eio.Resource.close tcp with _ -> ());
+                    (try Eio.Resource.close tcp
+               with Eio.Io _ | End_of_file | Invalid_argument _
+                  | Unix.Unix_error _ -> ());
                     Error e
                 | Ok flow ->
                     let reader =
@@ -433,7 +437,9 @@ let make_tcp_connector ~sw ~net ~host ~port ~tls =
                     let write cs = Eio.Flow.write flow [ cs ] in
                     let read_into buf = Eio.Flow.single_read flow buf in
                     let close () =
-                      try Eio.Resource.close flow with _ -> ()
+                      try Eio.Resource.close flow
+                      with Eio.Io _ | End_of_file | Invalid_argument _
+                         | Unix.Unix_error _ -> ()
                     in
                     Ok { write; reader; read_into; close })
          with exn -> Error (Error.Tcp_refused (Printexc.to_string exn)))
@@ -776,7 +782,9 @@ let rec supervisor_run t =
         let _ = run_connection t sock in
         if Atomic.get t.closing then ()
         else (
-          (try sock.close () with _ -> ());
+          (try sock.close ()
+           with Eio.Io _ | End_of_file | Invalid_argument _
+              | Unix.Unix_error _ -> ());
           Eio.Mutex.use_rw ~protect:true t.state_mutex (fun () ->
               t.current <- None;
               set_state t Recovering);
@@ -880,6 +888,8 @@ let close t =
         c)
   in
   match sock_to_close with
-  | Some sock -> (try sock.close () with _ -> ())
+  | Some sock -> (try sock.close ()
+           with Eio.Io _ | End_of_file | Invalid_argument _
+              | Unix.Unix_error _ -> ())
   | None -> ()
   end

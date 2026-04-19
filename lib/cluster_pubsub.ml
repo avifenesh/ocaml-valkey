@@ -148,7 +148,8 @@ let start_pump t conn ~(assign_cancel : (unit Eio.Promise.u -> unit)) =
 
 let resolve_cancel = function
   | Some u ->
-      (try Eio.Promise.resolve u () with _ -> ())
+      (try Eio.Promise.resolve u ()
+       with Invalid_argument _ -> ())
   | None -> ()
 
 (* ---------- global (non-sharded) path ---------- *)
@@ -224,7 +225,9 @@ let get_or_create_shard_entry t slot : (shard_entry, Connection.Error.t) result 
    SSUBSCRIBE. The entry stays in the hashtable. *)
 let repin_shard t (entry : shard_entry) ~new_id ~new_host ~new_port =
   resolve_cancel entry.pump_cancel;
-  (try Connection.close entry.conn with _ -> ());
+  (try Connection.close entry.conn
+   with Eio.Io _ | End_of_file | Invalid_argument _
+      | Unix.Unix_error _ -> ());
   let on_connected () = replay_shard t entry () in
   let conn = t.open_conn ~host:new_host ~port:new_port ~on_connected in
   entry.conn <- conn;
@@ -348,7 +351,8 @@ let create ~sw ~net ~clock ?domain_mgr
 
 let close t =
   if not (Atomic.exchange t.closing true) then begin
-    (try Eio.Promise.resolve t.close_resolver () with _ -> ());
+    (try Eio.Promise.resolve t.close_resolver ()
+     with Invalid_argument _ -> ());
     (* Cancel the pump fibers — each one will notice the resolved
        cancel promise and exit its Fiber.first race. *)
     resolve_cancel t.global.pump_cancel;
@@ -356,11 +360,15 @@ let close t =
         Hashtbl.iter
           (fun _ (e : shard_entry) -> resolve_cancel e.pump_cancel)
           t.shards);
-    (try Connection.close t.global.conn with _ -> ());
+    (try Connection.close t.global.conn
+     with Eio.Io _ | End_of_file | Invalid_argument _
+        | Unix.Unix_error _ -> ());
     with_mutex t.shards_mutex (fun () ->
         Hashtbl.iter
           (fun _ (e : shard_entry) ->
-            try Connection.close e.conn with _ -> ())
+            try Connection.close e.conn
+            with Eio.Io _ | End_of_file | Invalid_argument _
+               | Unix.Unix_error _ -> ())
           t.shards)
   end
 

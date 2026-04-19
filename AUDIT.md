@@ -224,11 +224,20 @@ safely re-invokable.
 3. Add a short "Locking discipline" comment at the top of
    `cluster_pubsub.ml`.
 
+**Should-fix, done in a follow-up commit at the start of Phase 3:**
+
+4. ✅ **Narrowed all 14 drain-path `with _` sites.** Close-path
+   sites now catch `Eio.Io _ | End_of_file | Invalid_argument _ |
+   Unix.Unix_error _` (covers connection teardown, double-close,
+   and underlying system errors). `Eio.Promise.resolve` sites
+   catch only `Invalid_argument _` (the one exception
+   already-resolved raises). Anything else — logic bugs, OOM,
+   stack overflows — now surfaces instead of being masked. Files
+   touched: `connection.ml`, `cluster_router.ml`,
+   `cluster_pubsub.ml`, `discovery.ml`, `node_pool.ml`.
+
 **Deferred (not blocking Phase 2 sign-off):**
 
-4. Narrow exception patterns in the 14 drain-path `with _` sites
-   (e.g., `with Eio.Io _ | End_of_file -> ()`). Waits until we have
-   evidence that an unexpected exception is being masked.
 5. Add logging for the 2 inline-defensive re-pin sites in
    cluster_pubsub. Waits until we introduce a logging abstraction
    in Phase 3 or 4.
