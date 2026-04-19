@@ -24,4 +24,6 @@ let () =
         Test_admin_family.tests;
       "cluster (needs docker compose -f docker-compose.cluster.yml)",
         Test_cluster.tests;
+      "command_spec property (needs docker compose -f docker-compose.cluster.yml)",
+        Test_command_spec_property.tests;
     ]
