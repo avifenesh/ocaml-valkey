@@ -235,6 +235,32 @@ let query_pool_for_topology pool =
       | Error _ -> None)
     conns
 
+let apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+    ~topology_atomic new_topo =
+  let current = Atomic.get topology_atomic in
+  if Topology.sha new_topo <> Topology.sha current then begin
+    diff_pool ~sw ~net ~clock ?domain_mgr
+      ~connection_config:cfg.Config.connection
+      ~prefer_hostname:cfg.Config.prefer_hostname
+      ~pool ~new_topology:new_topo ();
+    Atomic.set topology_atomic new_topo
+  end
+
+let refresh_from_seeds ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+    ~topology_atomic () =
+  match
+    Discovery.discover_from_seeds
+      ~sw ~net ~clock ?domain_mgr
+      ~connection_config:cfg.Config.connection
+      ~agreement_ratio:cfg.Config.agreement_ratio
+      ~min_nodes_for_quorum:cfg.Config.min_nodes_for_quorum
+      ~seeds:cfg.Config.seeds ()
+  with
+  | Ok new_topo ->
+      apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+        ~topology_atomic new_topo
+  | Error _ -> ()
+
 let refresh_once ~sw ~net ~clock ?domain_mgr ~cfg ~pool ~topology_atomic () =
   let views = query_pool_for_topology pool in
   let queried = List.length views in
@@ -245,15 +271,15 @@ let refresh_once ~sw ~net ~clock ?domain_mgr ~cfg ~pool ~topology_atomic () =
       ~queried ~views
   with
   | Agreed new_topo | Agreed_fallback new_topo ->
-      let current = Atomic.get topology_atomic in
-      if Topology.sha new_topo <> Topology.sha current then begin
-        diff_pool ~sw ~net ~clock ?domain_mgr
-          ~connection_config:cfg.Config.connection
-          ~prefer_hostname:cfg.Config.prefer_hostname
-          ~pool ~new_topology:new_topo ();
-        Atomic.set topology_atomic new_topo
-      end
-  | No_agreement -> ()
+      apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+        ~topology_atomic new_topo
+  | No_agreement ->
+      (* Pool is empty or every node is unreachable / disagrees. Fall
+         back to the seed list — that is how the cluster was bootstrapped,
+         and the only address set we can be sure is still meaningful to
+         the operator. *)
+      refresh_from_seeds ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+        ~topology_atomic ()
 
 let refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
     ~topology_atomic ~refresh_signal ~refresh_mutex ~closing () =
