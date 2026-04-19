@@ -1,6 +1,7 @@
 let () =
   Alcotest.run "valkey"
     [ "resp3", Test_resp3.tests;
+      "resp3 round-trip", Test_resp3_roundtrip.tests;
       "byte_reader", Test_byte_reader.tests;
       "valkey_error", Test_valkey_error.tests;
       "slot", Test_slot.tests;
