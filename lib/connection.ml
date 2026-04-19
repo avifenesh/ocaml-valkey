@@ -334,7 +334,7 @@ let extract_string_field key = function
 
 let run_hello (sock : socket) (hs : Handshake.t) : (Resp3.t, Error.t) result =
   sock.write (Resp3_writer.command_to_string (hello_args hs));
-  match Resp3_parser.read sock.reader with
+  match Resp3_parser.read (Resp3_parser.of_buf_read sock.reader) with
   | Map _ as m -> Ok m
   | Simple_error s | Bulk_error s ->
       Error (classify_handshake_error (Valkey_error.of_string s))
@@ -348,7 +348,7 @@ let run_hello (sock : socket) (hs : Handshake.t) : (Resp3.t, Error.t) result =
 let run_select (sock : socket) db : (unit, Error.t) result =
   sock.write
     (Resp3_writer.command_to_string [| "SELECT"; string_of_int db |]);
-  match Resp3_parser.read sock.reader with
+  match Resp3_parser.read (Resp3_parser.of_buf_read sock.reader) with
   | Simple_string "OK" -> Ok ()
   | Simple_error s | Bulk_error s ->
       Error (Handshake_rejected (Valkey_error.of_string s))
@@ -499,7 +499,7 @@ let read_worker (t : t) (sock : socket) : [ `Closed | `Error ] =
       let outcome =
         try
           Eio.Fiber.first
-            (fun () -> `Read (Resp3_parser.read sock.reader))
+            (fun () -> `Read (Resp3_parser.read (Resp3_parser.of_buf_read sock.reader)))
             (fun () ->
               Eio.Promise.await t.cancel_signal;
               `Cancelled)

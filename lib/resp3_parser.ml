@@ -1,11 +1,20 @@
-module R = Eio.Buf_read
-
 exception Parse_error of string
+
+type byte_source = {
+  any_char : unit -> char;
+  line : unit -> string;
+  take : int -> string;
+}
+
+let of_buf_read br =
+  { any_char = (fun () -> Eio.Buf_read.any_char br);
+    line = (fun () -> Eio.Buf_read.line br);
+    take = (fun n -> Eio.Buf_read.take n br); }
 
 let err fmt = Format.kasprintf (fun s -> raise (Parse_error s)) fmt
 
-let expect_crlf r =
-  let b = R.take 2 r in
+let expect_crlf (r : byte_source) =
+  let b = r.take 2 in
   if b <> "\r\n" then err "expected CRLF, got %S" b
 
 let parse_int64 s =
@@ -21,27 +30,27 @@ let parse_double s =
   | "nan" -> Float.nan
   | _ -> (try float_of_string s with _ -> err "invalid double %S" s)
 
-let read_bulk_body r =
-  let len_s = R.line r in
+let read_bulk_body (r : byte_source) =
+  let len_s = r.line () in
   if len_s = "-1" then None
   else if len_s = "?" then err "streamed bulk strings not yet implemented"
   else
     let len = parse_int len_s in
-    let body = R.take len r in
+    let body = r.take len in
     expect_crlf r;
     Some body
 
-let read_count r =
-  let s = R.line r in
+let read_count (r : byte_source) =
+  let s = r.line () in
   if s = "-1" then `Null
   else if s = "?" then `Streamed
   else `Count (parse_int s)
 
-let rec read (r : R.t) : Resp3.t =
-  match R.any_char r with
-  | '+' -> Simple_string (R.line r)
-  | '-' -> Simple_error (R.line r)
-  | ':' -> Integer (parse_int64 (R.line r))
+let rec read (r : byte_source) : Resp3.t =
+  match r.any_char () with
+  | '+' -> Simple_string (r.line ())
+  | '-' -> Simple_error (r.line ())
+  | ':' -> Integer (parse_int64 (r.line ()))
   | '$' ->
       (match read_bulk_body r with
        | None -> Null
@@ -52,16 +61,16 @@ let rec read (r : R.t) : Resp3.t =
        | `Streamed -> err "streamed arrays not yet implemented"
        | `Count n -> Array (read_n r n))
   | '_' ->
-      let s = R.line r in
+      let s = r.line () in
       if s <> "" then err "null with unexpected body %S" s;
       Null
   | '#' ->
-      (match R.line r with
+      (match r.line () with
        | "t" -> Boolean true
        | "f" -> Boolean false
        | s -> err "invalid boolean %S" s)
-  | ',' -> Double (parse_double (R.line r))
-  | '(' -> Big_number (R.line r)
+  | ',' -> Double (parse_double (r.line ()))
+  | '(' -> Big_number (r.line ())
   | '!' ->
       (match read_bulk_body r with
        | None -> err "null bulk-error is not defined by the protocol"

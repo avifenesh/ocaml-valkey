@@ -4,7 +4,7 @@ module W = Valkey.Resp3_writer
 
 let resp3 = Alcotest.testable R.pp R.equal
 
-let parse s = P.read (Eio.Buf_read.of_string s)
+let parse s = P.read (P.of_buf_read (Eio.Buf_read.of_string s))
 
 let test_simple_string () =
   Alcotest.check resp3 "PONG" (R.Simple_string "PONG") (parse "+PONG\r\n")
