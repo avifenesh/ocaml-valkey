@@ -7,39 +7,66 @@ on:
     branches: [main]
 
 jobs:
-  build-and-test:
+  # Full integration: docker-compose standalone + cluster, full tests,
+  # parser fuzzer strict at 100k, 30s standalone fuzz, 30s cluster fuzz.
+  # Linux only — docker compose is not available on GitHub's macOS
+  # runners without a licensed Docker Desktop image.
+  integration:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ocaml-compiler:
+          - "5.3.0"
+          - "5.4.0"
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml
+      - name: Set up OCaml ${{ matrix.ocaml-compiler }}
         uses: ocaml/setup-ocaml@v3
         with:
-          ocaml-compiler: "5.3.0"
+          ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
       - name: Install system deps
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y pkg-config libssl-dev libgmp-dev
+          sudo apt-get install -y pkg-config libssl-dev libgmp-dev curl jq
 
       - name: Install opam deps
-        run: |
-          opam install . --deps-only --with-test --yes
+        run: opam install . --deps-only --with-test --yes
 
       - name: Generate TLS dev certs
         run: bash scripts/gen-tls-certs.sh
 
-      - name: Start Valkey
+      - name: Start standalone Valkey
         run: |
           docker compose up -d
-          # wait until server is ready
           for i in $(seq 1 30); do
-            if docker compose exec -T valkey valkey-cli -p 6379 PING | grep -q PONG; then
-              echo "valkey up"
+            if docker compose exec -T valkey-dev valkey-cli -p 6379 PING 2>/dev/null | grep -q PONG; then
+              echo "standalone up"
               break
             fi
             sleep 1
+          done
+
+      - name: Start cluster
+        run: |
+          # GH Actions runners are Linux with sudo + no restricted shell,
+          # so the /etc/hosts mapping works the same as on a local WSL host.
+          sudo bash scripts/cluster-hosts-setup.sh
+          docker compose -f docker-compose.cluster.yml up -d
+          # Wait for cluster-init to report success.
+          for i in $(seq 1 60); do
+            status=$(docker inspect -f '{{.State.Status}}' ocaml-valkey-cluster-init 2>/dev/null || echo missing)
+            if [ "$status" = "exited" ]; then
+              code=$(docker inspect -f '{{.State.ExitCode}}' ocaml-valkey-cluster-init)
+              if [ "$code" = "0" ]; then echo "cluster up"; break; fi
+              echo "cluster-init failed (code=$code)"
+              docker logs ocaml-valkey-cluster-init || true
+              exit 1
+            fi
+            sleep 2
           done
 
       - name: Build
@@ -48,6 +75,83 @@ jobs:
       - name: Test
         run: opam exec -- dune runtest
 
-      - name: Stop Valkey
+      - name: Parser fuzzer (100k strict)
+        run: |
+          opam exec -- dune exec bin/fuzz_parser/fuzz_parser.exe -- \
+            --iterations 100000 --seed $GITHUB_RUN_ID --strict
+
+      - name: Stability fuzzer — standalone (30s, zero errors)
+        run: |
+          opam exec -- dune exec bin/fuzz/fuzz.exe -- \
+            --seconds 30 --workers 8 --max-errors 0
+
+      - name: Stability fuzzer — cluster (30s, zero errors)
+        run: |
+          opam exec -- dune exec bin/fuzz/fuzz.exe -- \
+            --seeds valkey-c1:7000,valkey-c2:7001,valkey-c3:7002 \
+            --seconds 30 --workers 8 --max-errors 0
+
+      - name: Upload test / fuzz logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-${{ matrix.ocaml-compiler }}
+          path: |
+            _build/_tests/
+            /tmp/valkey-fuzz-*.log
+          retention-days: 7
+
+      - name: Stop containers
         if: always()
-        run: docker compose down
+        run: |
+          docker compose -f docker-compose.cluster.yml down -v || true
+          docker compose down -v || true
+
+  # Build-and-unit-test matrix that doesn't need docker. Keeps macOS
+  # coverage on the cheap paths (pure-logic tests + parser fuzzer)
+  # so we catch portability regressions without the docker cost.
+  portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+        ocaml-compiler:
+          - "5.3.0"
+          - "5.4.0"
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml ${{ matrix.ocaml-compiler }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml-compiler }}
+
+      - name: Install opam deps
+        run: opam install . --deps-only --with-test --yes
+
+      - name: Build
+        run: opam exec -- dune build
+
+      - name: Run only docker-free tests
+        run: |
+          # Skip the integration tests that require a live Valkey
+          # instance — those only run on the Linux integration job.
+          opam exec -- dune exec test/run_tests.exe -- \
+            test 'resp3' || true
+          opam exec -- dune exec test/run_tests.exe -- \
+            test 'resp3 round-trip'
+          opam exec -- dune exec test/run_tests.exe -- \
+            test 'retry state machine'
+          opam exec -- dune exec test/run_tests.exe -- \
+            test 'command_spec'
+          opam exec -- dune exec test/run_tests.exe -- \
+            test 'slot'
+          opam exec -- dune exec test/run_tests.exe -- \
+            test 'topology'
+
+      - name: Parser fuzzer (50k strict)
+        run: |
+          opam exec -- dune exec bin/fuzz_parser/fuzz_parser.exe -- \
+            --iterations 50000 --seed $GITHUB_RUN_ID --strict
