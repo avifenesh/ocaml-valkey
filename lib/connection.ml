@@ -23,46 +23,50 @@ module Byte_sem = struct
         Eio.Condition.broadcast t.cond)
 end
 
+(* Thin wrapper over Eio.Stream so the rest of the code can use a consistent
+   interface. Eio.Stream.take is cancellable, which is what we need for clean
+   shutdown when the supervisor races workers. *)
 module Chan = struct
   type 'a t = {
-    q : 'a Queue.t;
-    mutex : Eio.Mutex.t;
-    cond : Eio.Condition.t;
+    stream : 'a Eio.Stream.t;
     mutable closed : bool;
+    closed_mutex : Eio.Mutex.t;
   }
 
   exception Closed
 
+  (* Eio.Stream is bounded by count. We want byte-budget to be the real
+     backpressure; pick a very large count cap so the stream never blocks
+     on count in realistic workloads. *)
+  let capacity = 1_000_000
+
   let create () =
-    { q = Queue.create ();
-      mutex = Eio.Mutex.create ();
-      cond = Eio.Condition.create ();
-      closed = false }
+    { stream = Eio.Stream.create capacity;
+      closed = false;
+      closed_mutex = Eio.Mutex.create () }
 
   let push t v =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-        if t.closed then raise Closed;
-        Queue.push v t.q;
-        Eio.Condition.broadcast t.cond)
+    Eio.Mutex.use_rw ~protect:true t.closed_mutex (fun () ->
+        if t.closed then raise Closed);
+    Eio.Stream.add t.stream v
 
   let take t =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-        while Queue.is_empty t.q && not t.closed do
-          Eio.Condition.await t.cond t.mutex
-        done;
-        if Queue.is_empty t.q then raise Closed
-        else Queue.pop t.q)
+    if t.closed && Eio.Stream.length t.stream = 0 then raise Closed
+    else Eio.Stream.take t.stream
 
   let close t =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-        t.closed <- true;
-        Eio.Condition.broadcast t.cond)
+    Eio.Mutex.use_rw ~protect:true t.closed_mutex (fun () ->
+        t.closed <- true)
 
   let drain t =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-        let drained = Queue.create () in
-        Queue.transfer t.q drained;
-        drained)
+    let drained = Queue.create () in
+    let rec loop () =
+      match Eio.Stream.take_nonblocking t.stream with
+      | Some v -> Queue.push v drained; loop ()
+      | None -> ()
+    in
+    loop ();
+    drained
 end
 
 module Error = struct
@@ -344,13 +348,17 @@ let write_worker (t : t) (sock : socket) : exn option =
             (try Chan.take t.cmd_queue
              with Chan.Closed -> raise Exit)
       in
-      try
-        sock.write q.bytes;
-        Queue.push q.entry t.sent;
-        loop ()
-      with exn ->
-        t.unsent <- Some q;
-        Some exn
+      let write_result =
+        try Ok (sock.write q.bytes)
+        with exn -> Error exn
+      in
+      match write_result with
+      | Error exn ->
+          t.unsent <- Some q;
+          Some exn
+      | Ok () ->
+          Queue.push q.entry t.sent;
+          loop ()
     end
   in
   try loop ()
