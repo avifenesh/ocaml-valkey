@@ -60,7 +60,7 @@ jobs:
           <ul>
             <li><a href="valkey/Valkey/index.html">API reference</a> (odoc)</li>
             <li><a href="guides/">Hand-written guides</a></li>
-            <li><a href="https://github.com/avifenesh/valkey-ocaml">Source</a></li>
+            <li><a href="https://github.com/avifenesh/ocaml-valkey">Source</a></li>
           </ul>
           EOF
 

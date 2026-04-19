@@ -14,8 +14,8 @@ opam install eio_main   # runtime for the examples below
 Or to hack on a checkout:
 
 ```bash
-git clone https://github.com/avifenesh/valkey-ocaml
-cd valkey-ocaml
+git clone https://github.com/avifenesh/ocaml-valkey
+cd ocaml-valkey
 opam install . --deps-only --with-test --yes
 dune build
 ```

@@ -5,7 +5,7 @@
 (generate_opam_files true)
 
 (source
- (github avifenesh/valkey-ocaml))
+ (github avifenesh/ocaml-valkey))
 
 (authors "Avi Fenesh")
 
@@ -13,7 +13,7 @@
 
 (license MIT)
 
-(documentation "https://github.com/avifenesh/valkey-ocaml")
+(documentation "https://github.com/avifenesh/ocaml-valkey")
 
 (package
  (name valkey)

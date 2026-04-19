@@ -1,4 +1,4 @@
-# valkey-ocaml
+# ocaml-valkey
 
 A modern Valkey client for OCaml 5 + [Eio](https://github.com/ocaml-multicore/eio).
 

@@ -242,7 +242,7 @@ a cluster-aware app in 15 minutes, without reading the source.
 - **API reference** via odoc. One-time setup:
   - Annotate every `.mli` with enough examples in doc-comments.
   - `dune build @doc` produces HTML.
-  - `gh-pages.yml` workflow publishes to the `valkey-ocaml.github.io`
+  - `gh-pages.yml` workflow publishes to the `ocaml-valkey.github.io`
     org or a `/docs` subtree on the main repo.
 - **`docs/` subtree** with hand-written guides:
   - `getting-started.md` — install + first program.

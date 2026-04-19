@@ -6,9 +6,9 @@ description:
 maintainer: ["Avi Fenesh"]
 authors: ["Avi Fenesh"]
 license: "MIT"
-homepage: "https://github.com/avifenesh/valkey-ocaml"
-doc: "https://github.com/avifenesh/valkey-ocaml"
-bug-reports: "https://github.com/avifenesh/valkey-ocaml/issues"
+homepage: "https://github.com/avifenesh/ocaml-valkey"
+doc: "https://github.com/avifenesh/ocaml-valkey"
+bug-reports: "https://github.com/avifenesh/ocaml-valkey/issues"
 depends: [
   "ocaml" {>= "5.3.0"}
   "dune" {>= "3.16" & >= "3.16"}
@@ -40,4 +40,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/avifenesh/valkey-ocaml.git"
+dev-repo: "git+https://github.com/avifenesh/ocaml-valkey.git"
