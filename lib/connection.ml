@@ -283,6 +283,7 @@ type t = {
   state_mutex : Eio.Mutex.t;
   state_changed : Eio.Condition.t;
   sent : entry Queue.t;
+  sent_mutex : Eio.Mutex.t;                (* guards sent across domains *)
   cmd_queue : queued Chan.t;
   budget : Byte_sem.t;
   config : Config.t;
@@ -291,6 +292,7 @@ type t = {
   sleep : float -> unit;
   now : unit -> float;
   with_timeout : 'a. float -> (unit -> 'a) -> ('a, [ `Timeout ]) result;
+  dispatch_io : 'a. (unit -> 'a) -> 'a;     (* runs on IO domain if configured *)
   mutable server_info : Resp3.t option;
   mutable availability_zone : string option;
   closing : bool Atomic.t;
@@ -445,8 +447,9 @@ let resolve_entry t (e : entry) (result : (Resp3.t, Error.t) result) =
   if not e.abandoned then Eio.Promise.resolve e.resolver result
 
 let drain_sent t (result : (Resp3.t, Error.t) result) =
-  Queue.iter (fun e -> resolve_entry t e result) t.sent;
-  Queue.clear t.sent
+  Eio.Mutex.use_rw ~protect:true t.sent_mutex (fun () ->
+      Queue.iter (fun e -> resolve_entry t e result) t.sent;
+      Queue.clear t.sent)
 
 let drain_unsent t (result : (Resp3.t, Error.t) result) =
   match t.unsent with
@@ -488,7 +491,8 @@ let out_pump (t : t) (sock : socket) : unit =
           t.unsent <- Some q
           (* leave loop; raise disconnect by returning *)
       | Ok () ->
-          Queue.push q.entry t.sent;
+          Eio.Mutex.use_rw ~protect:true t.sent_mutex (fun () ->
+              Queue.push q.entry t.sent);
           loop ()
     end
   in
@@ -541,7 +545,11 @@ let parse_worker (t : t) (byte_src : Resp3_parser.byte_source) : unit =
           Eio.Stream.add t.pushes p;
           loop ()
       | `Read value ->
-          (match Queue.take_opt t.sent with
+          let entry =
+            Eio.Mutex.use_rw ~protect:true t.sent_mutex (fun () ->
+                Queue.take_opt t.sent)
+          in
+          (match entry with
            | Some e ->
                let result =
                  match value with
@@ -559,12 +567,18 @@ let run_connection (t : t) (sock : socket) : [ `Closed | `Disconnected ] =
   let bytes_chan : Cstruct.t Eio.Stream.t = Eio.Stream.create 128 in
   let reader = Byte_reader.create bytes_chan in
   let byte_src = Byte_reader.to_byte_source reader in
+  let io_block () =
+    (try
+       Eio.Fiber.first
+         (fun () -> in_pump t sock bytes_chan reader)
+         (fun () -> out_pump t sock)
+     with _ -> ());
+    Byte_reader.close reader
+  in
   (try
-     Eio.Fiber.any
-       [ (fun () -> in_pump t sock bytes_chan reader);
-         (fun () -> parse_worker t byte_src);
-         (fun () -> out_pump t sock);
-       ]
+     Eio.Fiber.first
+       (fun () -> t.dispatch_io io_block)
+       (fun () -> parse_worker t byte_src)
    with _ -> ());
   if Atomic.get t.closing then `Closed else `Disconnected
 
@@ -728,6 +742,11 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port (
       | Ok v -> Ok v
       | Error `Timeout -> Error `Timeout
   in
+  let dispatch_io : 'a. (unit -> 'a) -> 'a = fun f ->
+    match domain_mgr with
+    | None -> f ()
+    | Some mgr -> Eio.Domain_manager.run mgr f
+  in
   let cancel_signal, cancel_resolver = Eio.Promise.create () in
   let t : t = {
     state = Connecting;
@@ -736,6 +755,7 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port (
     state_mutex = Eio.Mutex.create ();
     state_changed = Eio.Condition.create ();
     sent = Queue.create ();
+    sent_mutex = Eio.Mutex.create ();
     cmd_queue = Chan.create ();
     budget = Byte_sem.make config.max_queued_bytes;
     config;
@@ -744,6 +764,7 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port (
     sleep;
     now;
     with_timeout;
+    dispatch_io;
     server_info = None;
     availability_zone = None;
     closing = Atomic.make false;
@@ -765,20 +786,15 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port (
        t.server_info <- Some info;
        t.availability_zone <- az;
        t.state <- Alive);
-  let run_workers () =
-    Eio.Switch.run @@ fun worker_sw ->
-    Eio.Fiber.fork ~sw:worker_sw (fun () -> supervisor_run t);
-    (match config.keepalive_interval with
-     | None -> ()
-     | Some interval ->
-         Eio.Fiber.fork ~sw:worker_sw (fun () -> keepalive_loop t interval))
-  in
-  (match domain_mgr with
-   | None ->
-       Eio.Fiber.fork ~sw (fun () -> run_workers ())
-   | Some mgr ->
-       Eio.Fiber.fork ~sw (fun () ->
-           Eio.Domain_manager.run mgr run_workers));
+  (* Supervisor + keepalive run on the user's domain. run_connection uses
+     t.dispatch_io internally so that in_pump + out_pump go to the IO domain
+     (if domain_mgr was supplied), while parse_worker stays here. This is
+     what keeps a CPU-heavy parser from blocking socket I/O. *)
+  Eio.Fiber.fork ~sw (fun () -> supervisor_run t);
+  (match config.keepalive_interval with
+   | None -> ()
+   | Some interval ->
+       Eio.Fiber.fork ~sw (fun () -> keepalive_loop t interval));
   t
 
 let pushes t = t.pushes

@@ -221,6 +221,41 @@ let test_circuit_breaker () =
     (C.request conn [| "PING" |]);
   C.close conn
 
+(* Use domain_mgr so in_pump + out_pump run on a dedicated OS thread while
+   the parser + user fibers stay on the caller's domain. Verify commands
+   still flow end-to-end. *)
+let test_with_domain_mgr () =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let domain_mgr = Eio.Stdenv.domain_mgr env in
+  let conn =
+    C.connect ~sw ~net ~clock ~domain_mgr ~host:"localhost" ~port:6379 ()
+  in
+  expect_simple_eq ~ctx:"PING over split domain" ~expected:"PONG"
+    (C.request conn [| "PING" |]);
+  let key = "ocaml:test:dm" in
+  ignore (C.request conn [| "DEL"; key |]);
+  expect_simple_eq ~ctx:"SET" ~expected:"OK"
+    (C.request conn [| "SET"; key; "v1" |]);
+  expect_bulk_eq ~ctx:"GET" ~expected:"v1"
+    (C.request conn [| "GET"; key |]);
+  ignore (C.request conn [| "DEL"; key |]);
+  (* Concurrent fibers, to ensure cross-domain cmd_queue + sent still work. *)
+  Eio.Fiber.all
+    (List.init 30 (fun i () ->
+         let k = Printf.sprintf "%s:%d" key i in
+         match C.request conn [| "SET"; k; string_of_int i |] with
+         | Ok _ -> ()
+         | Error e ->
+             Alcotest.failf "SET %s failed: %a" k C.Error.pp e));
+  ignore
+    (C.request conn
+       (Array.of_list
+          ("DEL" :: List.init 30 (fun i -> Printf.sprintf "%s:%d" key i))));
+  C.close conn
+
 let test_keepalive () =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -361,4 +396,6 @@ let tests =
     Alcotest.test_case "keepalive fires" `Quick test_keepalive;
     Alcotest.test_case "circuit breaker opens and recovers" `Quick
       test_circuit_breaker;
+    Alcotest.test_case "domain_mgr (IO on separate domain)" `Quick
+      test_with_domain_mgr;
   ]
