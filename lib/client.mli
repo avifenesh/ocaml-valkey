@@ -35,6 +35,12 @@ val close : t -> unit
 
 val raw_connection : t -> Connection.t
 
+val connection_for_slot : t -> int -> Connection.t option
+(** Return the live connection whose primary owns [slot], or [None]
+    if the pool has no entry for it. Standalone always returns the
+    single connection. Used by modules like [Transaction] that need
+    to pin a sequence of commands to one server. *)
+
 val exec :
   ?timeout:float ->
   ?target:Target.t ->

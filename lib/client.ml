@@ -58,6 +58,8 @@ let raw_connection t =
         "Client.raw_connection: no primary connection available \
          (multi-node router)"
 
+let connection_for_slot t slot = Router.connection_for_slot t.router slot
+
 let exec ?timeout ?target ?read_from t args =
   let user_rf = Option.value read_from ~default:t.config.read_from in
   match target with

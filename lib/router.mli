@@ -42,11 +42,19 @@ type exec_multi_fn =
   ?timeout:float -> Fan_target.t -> string array ->
   (string * (Resp3.t, Connection.Error.t) result) list
 
+type connection_for_slot_fn =
+  int -> Connection.t option
+(** Resolve the live [Connection.t] for the primary that owns the
+    given slot. Used by [Transaction] to pin a MULTI/EXEC block to a
+    specific node; returns [None] if the slot has no live connection
+    in the pool (topology out of date or node unreachable). *)
+
 val make :
   exec:exec_fn ->
   exec_multi:exec_multi_fn ->
   close:(unit -> unit) ->
   primary:(unit -> Connection.t option) ->
+  connection_for_slot:connection_for_slot_fn ->
   t
 
 val standalone : Connection.t -> t
@@ -67,3 +75,8 @@ val exec_multi :
 val close : t -> unit
 
 val primary_connection : t -> Connection.t option
+
+val connection_for_slot : t -> int -> Connection.t option
+(** Returns the live [Connection.t] whose primary owns [slot], or
+    [None] if none is in the pool. On standalone this always
+    returns the single connection. *)

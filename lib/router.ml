@@ -31,16 +31,19 @@ type exec_multi_fn =
   ?timeout:float -> Fan_target.t -> string array ->
   (string * (Resp3.t, Connection.Error.t) result) list
 
+type connection_for_slot_fn = int -> Connection.t option
+
 type t = {
   exec : exec_fn;
   exec_multi : exec_multi_fn;
   close : unit -> unit;
   primary : unit -> Connection.t option;
+  connection_for_slot : connection_for_slot_fn;
 }
 [@@warning "-69"]
 
-let make ~exec ~exec_multi ~close ~primary =
-  { exec; exec_multi; close; primary }
+let make ~exec ~exec_multi ~close ~primary ~connection_for_slot =
+  { exec; exec_multi; close; primary; connection_for_slot }
 
 let standalone (conn : Connection.t) : t =
   let exec ?timeout _target _read_from args =
@@ -52,9 +55,11 @@ let standalone (conn : Connection.t) : t =
   { exec; exec_multi;
     close = (fun () -> Connection.close conn);
     primary = (fun () -> Some conn);
+    connection_for_slot = (fun _ -> Some conn);
   }
 
 let exec ?timeout t target rf args = t.exec ?timeout target rf args
 let exec_multi ?timeout t fan args = t.exec_multi ?timeout fan args
 let close t = t.close ()
 let primary_connection t = t.primary ()
+let connection_for_slot t slot = t.connection_for_slot slot

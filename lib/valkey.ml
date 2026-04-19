@@ -14,3 +14,4 @@ module Command_spec = Command_spec
 module Connection = Connection
 module Client = Client
 module Cluster_router = Cluster_router
+module Transaction = Transaction

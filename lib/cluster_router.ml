@@ -251,6 +251,11 @@ let make_exec_multi ~pool ~topology_ref ?timeout
   in
   Eio.Fiber.List.map dispatch_one nodes
 
+let connection_for_slot_via ~pool ~topology_ref slot =
+  match Topology.shard_for_slot !topology_ref slot with
+  | None -> None
+  | Some shard -> Node_pool.get pool shard.primary.id
+
 let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
   let topology_ref = ref topology in
   let trigger_refresh () = () in
@@ -265,7 +270,10 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
   let primary () =
     match Node_pool.connections pool with [] -> None | c :: _ -> Some c
   in
-  Router.make ~exec ~exec_multi ~close ~primary
+  let connection_for_slot slot =
+    connection_for_slot_via ~pool ~topology_ref slot
+  in
+  Router.make ~exec ~exec_multi ~close ~primary ~connection_for_slot
 
 (* ---------- refresh fiber ---------- *)
 
@@ -440,4 +448,9 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
         | [] -> None
         | c :: _ -> Some c
       in
-      Ok (Router.make ~exec ~exec_multi ~close ~primary)
+      let connection_for_slot slot =
+        sync_ref ();
+        connection_for_slot_via ~pool ~topology_ref slot
+      in
+      Ok (Router.make ~exec ~exec_multi ~close ~primary
+            ~connection_for_slot)
