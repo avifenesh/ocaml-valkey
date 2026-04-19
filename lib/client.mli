@@ -391,3 +391,33 @@ val zcard :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> (int, Connection.Error.t) result
+
+(** {1 Scripting (Lua)} *)
+
+val eval :
+  ?timeout:float ->
+  t -> script:string -> keys:string list -> args:string list ->
+  (Resp3.t, Connection.Error.t) result
+(** Returns the raw RESP3 reply — Lua scripts can return any type. *)
+
+val evalsha :
+  ?timeout:float ->
+  t -> sha:string -> keys:string list -> args:string list ->
+  (Resp3.t, Connection.Error.t) result
+
+val script_load :
+  ?timeout:float ->
+  t -> string -> (string, Connection.Error.t) result
+(** Returns the SHA1 of the loaded script. *)
+
+val script_exists :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string list -> (bool list, Connection.Error.t) result
+
+type script_flush_mode = Flush_sync | Flush_async
+
+val script_flush :
+  ?timeout:float ->
+  ?mode:script_flush_mode ->
+  t -> (unit, Connection.Error.t) result

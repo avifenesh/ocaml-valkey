@@ -612,3 +612,53 @@ let zcard ?timeout ?read_from t key =
   | Error e -> Error e
   | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
   | Ok v -> Error (protocol_violation "ZCARD" v)
+
+(* ---------- scripting ---------- *)
+
+let eval_like cmd ?timeout t ~code ~keys ~args =
+  let nkeys = string_of_int (List.length keys) in
+  let req =
+    Array.of_list ([ cmd; code; nkeys ] @ keys @ args)
+  in
+  exec ?timeout t req
+
+let eval ?timeout t ~script ~keys ~args =
+  eval_like "EVAL" ?timeout t ~code:script ~keys ~args
+
+let evalsha ?timeout t ~sha ~keys ~args =
+  eval_like "EVALSHA" ?timeout t ~code:sha ~keys ~args
+
+let script_load ?timeout t script =
+  match exec ?timeout t [| "SCRIPT"; "LOAD"; script |] with
+  | Error e -> Error e
+  | Ok (Resp3.Bulk_string s) -> Ok s
+  | Ok (Resp3.Simple_string s) -> Ok s
+  | Ok v -> Error (protocol_violation "SCRIPT LOAD" v)
+
+let script_exists ?timeout ?read_from t shas =
+  let args = Array.of_list ("SCRIPT" :: "EXISTS" :: shas) in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | Resp3.Integer 0L :: rest -> loop (false :: acc) rest
+        | Resp3.Integer 1L :: rest -> loop (true :: acc) rest
+        | other :: _ -> Error (protocol_violation "SCRIPT EXISTS" other)
+      in
+      loop [] items
+  | Ok v -> Error (protocol_violation "SCRIPT EXISTS" v)
+
+type script_flush_mode = Flush_sync | Flush_async
+
+let script_flush ?timeout ?mode t =
+  let tail = match mode with
+    | None -> []
+    | Some Flush_sync -> [ "SYNC" ]
+    | Some Flush_async -> [ "ASYNC" ]
+  in
+  let args = Array.of_list ([ "SCRIPT"; "FLUSH" ] @ tail) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Simple_string "OK") -> Ok ()
+  | Ok v -> Error (protocol_violation "SCRIPT FLUSH" v)

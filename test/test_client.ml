@@ -571,6 +571,37 @@ let tests =
          | Ok n -> n | Error e -> Alcotest.failf "ZCARD: %a" E.pp e);
       let _ = C.del c [ key ] in
       ());
+    Alcotest.test_case "SCRIPT LOAD / EVALSHA / SCRIPT EXISTS / EVAL" `Quick
+      (fun () ->
+      with_client @@ fun c ->
+      let script = "return redis.call('GET', KEYS[1])" in
+      let key = "ocaml:c:script" in
+      ignore (C.set c key "hello");
+      let sha =
+        match C.script_load c script with
+        | Ok s -> s
+        | Error e -> Alcotest.failf "SCRIPT LOAD: %a" E.pp e
+      in
+      Alcotest.(check (list bool)) "SCRIPT EXISTS"
+        [ true; false ]
+        (match C.script_exists c [ sha; "deadbeef" ^ String.make 32 '0' ] with
+         | Ok bs -> bs | Error e -> Alcotest.failf "SCRIPT EXISTS: %a" E.pp e);
+      (match C.evalsha c ~sha ~keys:[ key ] ~args:[] with
+       | Ok (R.Bulk_string "hello") -> ()
+       | other ->
+           Alcotest.failf "EVALSHA: %s"
+             (match other with
+              | Ok v -> Format.asprintf "Ok %a" R.pp v
+              | Error e -> Format.asprintf "Error %a" E.pp e));
+      (match C.eval c ~script ~keys:[ key ] ~args:[] with
+       | Ok (R.Bulk_string "hello") -> ()
+       | other ->
+           Alcotest.failf "EVAL: %s"
+             (match other with
+              | Ok v -> Format.asprintf "Ok %a" R.pp v
+              | Error e -> Format.asprintf "Error %a" E.pp e));
+      let _ = C.del c [ key ] in
+      ());
     Alcotest.test_case "HINCRBY" `Quick (fun () ->
       with_client @@ fun c ->
       let key = "ocaml:c:h4" in
