@@ -1,3 +1,5 @@
 module Resp3 = Resp3
+module Resp3_parser = Resp3_parser
+module Resp3_writer = Resp3_writer
 module Error = Valkey_error
 module Connection = Connection

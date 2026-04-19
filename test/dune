@@ -1,0 +1,3 @@
+(test
+ (name run_tests)
+ (libraries valkey alcotest eio_main))
