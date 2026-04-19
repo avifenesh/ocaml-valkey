@@ -23,6 +23,7 @@ depends: [
   "mirage-crypto-rng"
   "digestif"
   "alcotest" {with-test}
+  "bisect_ppx" {with-dev-setup & >= "2.8.0"}
   "odoc" {with-doc}
 ]
 build: [

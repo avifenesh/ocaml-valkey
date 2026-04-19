@@ -20,6 +20,7 @@ type args = {
   warmup : int;
   key_space : int;
   filter : string option;
+  json_out : string option;
 }
 
 let default_args = {
@@ -29,6 +30,7 @@ let default_args = {
   warmup = 1_000;
   key_space = 10_000;
   filter = None;
+  json_out = None;
 }
 
 let parse_args () =
@@ -46,6 +48,8 @@ let parse_args () =
       "N keyspace size (default 10000)";
       "--filter", Arg.String (fun s -> a := { !a with filter = Some s }),
       "SUBSTR run only scenarios whose name contains SUBSTR";
+      "--json", Arg.String (fun s -> a := { !a with json_out = Some s }),
+      "PATH emit JSON results to PATH (for bench_compare)";
     ]
   in
   Arg.parse specs (fun _ -> ()) "valkey-bench [OPTIONS]";
@@ -155,6 +159,10 @@ let run_op client rng ~key_space kind ~value =
 
 (* ---------- driver ---------- *)
 
+(* Accumulates per-scenario summaries for the optional JSON output. *)
+let results : (string * int * float * float * float * float * float * float * float) list ref =
+  ref []
+
 let run_scenario ~env ~args scenario =
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
@@ -219,7 +227,10 @@ let run_scenario ~env ~args scenario =
     (Printf.sprintf "%.3fms" (p90 *. 1000.0))
     (Printf.sprintf "%.3fms" (p99 *. 1000.0))
     (Printf.sprintf "%.3fms" (p999 *. 1000.0))
-    (Printf.sprintf "%.3fms" (max_ *. 1000.0))
+    (Printf.sprintf "%.3fms" (max_ *. 1000.0));
+  results :=
+    (scenario_name scenario, count, tput, avg, p50, p90, p99, p999, max_)
+    :: !results
 
 (* ---------- main ---------- *)
 
@@ -241,4 +252,41 @@ let () =
   Printf.printf "%s\n" (String.make 165 '=');
 
   Eio_main.run @@ fun env ->
-  List.iter (run_scenario ~env ~args) scenarios_to_run
+  List.iter (run_scenario ~env ~args) scenarios_to_run;
+
+  (* Optional JSON emit. Manual encoding keeps the dep footprint
+     zero (no yojson). Shape:
+       { "scenarios": [
+           { "name": "...",
+             "count": N,
+             "ops_per_sec": 12345.6,
+             "avg_ms": 0.123,
+             "p50_ms": ..., "p90_ms": ..., "p99_ms": ...,
+             "p999_ms": ..., "max_ms": ... }, ...
+         ] } *)
+  (match args.json_out with
+   | None -> ()
+   | Some path ->
+       let buf = Buffer.create 1024 in
+       Buffer.add_string buf "{\n  \"scenarios\": [\n";
+       let items = List.rev !results in
+       List.iteri
+         (fun i (name, count, tput, avg, p50, p90, p99, p999, max_) ->
+           if i > 0 then Buffer.add_string buf ",\n";
+           Buffer.add_string buf
+             (Printf.sprintf
+                "    { \"name\": %S, \"count\": %d, \
+                 \"ops_per_sec\": %.2f, \"avg_ms\": %.3f, \
+                 \"p50_ms\": %.3f, \"p90_ms\": %.3f, \
+                 \"p99_ms\": %.3f, \"p999_ms\": %.3f, \
+                 \"max_ms\": %.3f }"
+                (String.trim name) count tput
+                (avg *. 1000.0) (p50 *. 1000.0) (p90 *. 1000.0)
+                (p99 *. 1000.0) (p999 *. 1000.0)
+                (max_ *. 1000.0)))
+         items;
+       Buffer.add_string buf "\n  ]\n}\n";
+       let oc = open_out path in
+       Buffer.output_buffer oc buf;
+       close_out oc;
+       Printf.printf "wrote %s\n%!" path)

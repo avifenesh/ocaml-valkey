@@ -1,0 +1,147 @@
+name: Benchmark
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.3.0"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y pkg-config libssl-dev libgmp-dev curl
+
+      - name: Install opam deps
+        run: opam install . --deps-only --with-test --yes
+
+      - name: Start standalone Valkey
+        run: |
+          docker compose up -d
+          for i in $(seq 1 30); do
+            if docker compose exec -T valkey-dev valkey-cli -p 6379 PING 2>/dev/null | grep -q PONG; then
+              echo "up"; break
+            fi
+            sleep 1
+          done
+
+      - name: Build
+        run: opam exec -- dune build
+
+      # Shortened ops count for CI — the full bench is ~5 min with
+      # --ops 50000; this trims to ~90s while keeping the same shape.
+      - name: Bench HEAD
+        run: |
+          opam exec -- dune exec bin/bench/bench.exe -- \
+            --ops 5000 --warmup 500 --json head.json
+
+      - name: Fetch + bench main baseline
+        # Skip if this build *is* main — no baseline to compare to.
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin main --depth=1
+          git stash push -u -m 'bench-head' || true
+          git checkout origin/main -- .
+          opam exec -- dune build
+          opam exec -- dune exec bin/bench/bench.exe -- \
+            --ops 5000 --warmup 500 --json main.json
+          # Restore PR head working tree.
+          git checkout HEAD -- .
+          git stash pop || true
+
+      - name: Compare
+        if: github.event_name == 'pull_request'
+        id: compare
+        run: |
+          opam exec -- dune build bin/bench_compare/
+          {
+            echo "## Benchmark: main → this PR"
+            echo
+            opam exec -- dune exec bin/bench_compare/bench_compare.exe -- \
+              main.json head.json --regress-threshold 10 \
+              > /tmp/bench-compare.md 2> /tmp/bench-compare.err && rc=0 || rc=$?
+            cat /tmp/bench-compare.md
+            if [ "$rc" -ne 0 ]; then
+              echo
+              echo "### ⚠️ regressions"
+              echo '```'
+              cat /tmp/bench-compare.err
+              echo '```'
+            fi
+            echo "$rc" > /tmp/bench-compare.rc
+          } > /tmp/bench-comment.md
+          cat /tmp/bench-comment.md
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/bench-comment.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            // Replace prior bench comment if one exists so we don't
+            // pile up stale benchmark tables on long-lived PRs.
+            const comments = await github.rest.issues.listComments({
+              owner, repo, issue_number
+            });
+            const prior = comments.data.find(
+              c => c.user.type === 'Bot' && c.body.includes('Benchmark: main → this PR')
+            );
+            if (prior) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: prior.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body
+              });
+            }
+
+      - name: Fail on regression
+        if: github.event_name == 'pull_request'
+        run: |
+          rc=$(cat /tmp/bench-compare.rc)
+          if [ "$rc" != "0" ]; then
+            echo "::error::benchmark regressed more than 10% on at least one scenario"
+            exit 1
+          fi
+
+      - name: Record baseline on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p .bench-results
+          cp head.json ".bench-results/${GITHUB_SHA}.json"
+          cp head.json .bench-results/latest.json
+          ls .bench-results
+
+      - name: Commit baseline to bench-history branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./.bench-results
+          publish_branch: bench-history
+          keep_files: true
+
+      - name: Stop Valkey
+        if: always()
+        run: docker compose down -v || true

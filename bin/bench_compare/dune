@@ -1,0 +1,4 @@
+(executable
+ (name bench_compare)
+ (public_name valkey-bench-compare)
+ (flags (:standard -w -69)))
