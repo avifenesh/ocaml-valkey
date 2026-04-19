@@ -6,6 +6,8 @@ module Config = struct
     min_nodes_for_quorum : int;
     max_redirects : int;
     prefer_hostname : bool;
+    refresh_interval : float;
+    refresh_jitter : float;
   }
 
   let default ~seeds = {
@@ -15,6 +17,8 @@ module Config = struct
     min_nodes_for_quorum = 3;
     max_redirects = 5;
     prefer_hostname = false;
+    refresh_interval = 15.0;
+    refresh_jitter = 15.0;
   }
 end
 
@@ -177,6 +181,104 @@ let from_pool_and_topology ?(max_redirects = 5) ~pool ~topology () =
   in
   Router.make ~exec ~close ~primary
 
+(* ---------- refresh fiber ---------- *)
+
+let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
+    ~prefer_hostname ~pool ~new_topology () =
+  let new_nodes = Topology.all_nodes new_topology in
+  let new_ids =
+    List.map (fun (n : Topology.Node.t) -> n.id) new_nodes
+  in
+  let old_ids = Node_pool.node_ids pool in
+  (* Close removed *)
+  List.iter
+    (fun id ->
+      if not (List.mem id new_ids) then
+        match Node_pool.remove pool id with
+        | Some c -> (try Connection.close c with _ -> ())
+        | None -> ())
+    old_ids;
+  (* Add new (online nodes only) *)
+  let tls_enabled = connection_config.Connection.Config.tls <> None in
+  List.iter
+    (fun (n : Topology.Node.t) ->
+      if not (List.mem n.id old_ids) && n.health = Topology.Node.Online
+      then
+        match
+          address_of_node ~prefer_hostname n,
+          port_of_node ~tls:tls_enabled n
+        with
+        | Some host, Some port ->
+            (try
+               let conn =
+                 Connection.connect ~sw ~net ~clock ?domain_mgr
+                   ~config:connection_config ~host ~port ()
+               in
+               Node_pool.add pool n.id conn
+             with _ -> ())
+        | _ -> ())
+    new_nodes
+
+let query_pool_for_topology pool =
+  let conns = Node_pool.connections pool in
+  Eio.Fiber.List.map
+    (fun c ->
+      match Connection.request c [| "CLUSTER"; "SHARDS" |] with
+      | Ok reply ->
+          (match Topology.of_cluster_shards reply with
+           | Ok t -> Some t
+           | Error _ -> None)
+      | Error _ -> None)
+    conns
+
+let refresh_once ~sw ~net ~clock ?domain_mgr ~cfg ~pool ~topology_atomic () =
+  let views = query_pool_for_topology pool in
+  let queried = List.length views in
+  match
+    Discovery.select
+      ~agreement_ratio:cfg.Config.agreement_ratio
+      ~min_nodes_for_quorum:cfg.Config.min_nodes_for_quorum
+      ~queried ~views
+  with
+  | Agreed new_topo | Agreed_fallback new_topo ->
+      let current = Atomic.get topology_atomic in
+      if Topology.sha new_topo <> Topology.sha current then begin
+        diff_pool ~sw ~net ~clock ?domain_mgr
+          ~connection_config:cfg.Config.connection
+          ~prefer_hostname:cfg.Config.prefer_hostname
+          ~pool ~new_topology:new_topo ();
+        Atomic.set topology_atomic new_topo
+      end
+  | No_agreement -> ()
+
+let refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+    ~topology_atomic ~refresh_signal ~refresh_mutex ~closing () =
+  let rec loop () =
+    if Atomic.get closing then ()
+    else
+      let interval =
+        cfg.Config.refresh_interval
+        +. Random.float cfg.Config.refresh_jitter
+      in
+      let _ : [ `Elapsed | `Signal ] =
+        Eio.Fiber.first
+          (fun () -> Eio.Time.sleep clock interval; `Elapsed)
+          (fun () ->
+            Eio.Mutex.use_rw ~protect:true refresh_mutex (fun () ->
+                Eio.Condition.await refresh_signal refresh_mutex);
+            `Signal)
+      in
+      if Atomic.get closing then ()
+      else begin
+        (try
+           refresh_once ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+             ~topology_atomic ()
+         with _ -> ());
+        loop ()
+      end
+  in
+  try loop () with _ -> ()
+
 let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
   match
     Discovery.discover_from_seeds
@@ -194,5 +296,29 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
           ~prefer_hostname:cfg.prefer_hostname
           topology
       in
-      Ok (from_pool_and_topology ~max_redirects:cfg.max_redirects
-            ~pool ~topology ())
+      let topology_atomic = Atomic.make topology in
+      let closing = Atomic.make false in
+      let refresh_signal = Eio.Condition.create () in
+      let refresh_mutex = Eio.Mutex.create () in
+      Eio.Fiber.fork ~sw (fun () ->
+          refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+            ~topology_atomic ~refresh_signal ~refresh_mutex ~closing ());
+      let topology_ref = ref topology in
+      let exec ?timeout target rf args =
+        (* Thread the atomic's latest value through the existing ref-based
+           dispatch. On refresh the ref is re-synced. *)
+        topology_ref := Atomic.get topology_atomic;
+        make_exec ~pool ~topology_ref ~max_redirects:cfg.max_redirects
+          ?timeout target rf args
+      in
+      let close () =
+        Atomic.set closing true;
+        Eio.Condition.broadcast refresh_signal;
+        Node_pool.close_all pool
+      in
+      let primary () =
+        match Node_pool.connections pool with
+        | [] -> None
+        | c :: _ -> Some c
+      in
+      Ok (Router.make ~exec ~close ~primary)

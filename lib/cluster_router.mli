@@ -13,6 +13,9 @@ module Config : sig
     min_nodes_for_quorum : int;
     max_redirects : int;          (** MOVED/ASK retries per command *)
     prefer_hostname : bool;       (** Use [Node.hostname] when set. *)
+    refresh_interval : float;     (** Base interval (s) between periodic
+                                      topology refreshes. *)
+    refresh_jitter : float;       (** Additional random wait [0, jitter] s. *)
   }
   val default : seeds:(string * int) list -> t
 end
