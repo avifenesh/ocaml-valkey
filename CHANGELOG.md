@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase 5 (examples)
+
+- Initial set of 9 runnable example programs under `examples/`:
+  01-hello (strings/counters/hashes/streams/consumer groups),
+  02-cluster (Read_from modes + TLS template), 03-pubsub,
+  04-transaction (WATCH retry), 05-cache-aside (hash field TTL),
+  06-distributed-lock (SET NX EX + CAD release), 07-task-queue
+  (streams + consumer groups + XAUTOCLAIM), 08-blocking-commands
+  (BRPOP), 09-leaderboard (sorted-set).
+- `examples/README.md` documents the set and the convention.
+- `CONTRIBUTING.md` updated: new significant features land with
+  the example that exercises them.
+
+### Changed
+
+- `Cluster_router.pick_node_by_read_from` now picks a random
+  replica for `Prefer_replica` and `Az_affinity` modes (was
+  always the first replica, which pinned all reads from one
+  client to a single replica). Spreads readonly traffic across
+  the replica set.
+
+### Known gaps surfaced by examples
+
+- Sorted-set commands `ZADD`, `ZINCRBY`, `ZRANK`, `ZSCORE`,
+  `ZREVRANGE` are not yet typed wrappers — the leaderboard
+  example uses `Client.custom` for them. Wrapping them is on the
+  pre-1.0 list.
+
 ### Added — Phase 4 (documentation)
 
 - `docs/` — 9 hand-written guides covering getting-started, cluster,

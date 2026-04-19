@@ -135,6 +135,33 @@ Fixes this commit:
     Atomic.exchange so repeat calls are true no-ops.
 ```
 
+## Examples (the rule going forward)
+
+When you land a new significant feature — a new typed command
+family, a new connection mode, a routing primitive, a recovery
+strategy — **add a small runnable example under `examples/`**
+that exercises it. Examples are the most honest documentation we
+have for how the API is *meant* to be used.
+
+Each example is its own subdirectory:
+
+```
+examples/<NN>-<name>/
+  dune
+  README.md     # what it shows + how to run + things to notice
+  main.ml       # one or more .ml files, each a separate executable
+```
+
+They build under the same `dune build` as the library. See
+[`examples/README.md`](examples/README.md) for the existing set
+and the canonical shape.
+
+If you add a new typed wrapper for a previously-unwrapped command
+(e.g. ZADD, ZINCRBY are pending), update or extend the example
+that uses the relevant primitive — the leaderboard demo currently
+uses `Client.custom` for those; that should become a typed call
+the moment the wrapper lands.
+
 ## PR checklist
 
 Before opening a PR:
@@ -147,6 +174,8 @@ Before opening a PR:
       clean.
 - [ ] If you touched a Valkey command: the `.mli` doc comment
       quotes the valkey.io syntax.
+- [ ] If you landed a significant new feature: an example under
+      `examples/` exercises it.
 - [ ] `CHANGELOG.md` updated under `## [Unreleased]`.
 - [ ] If you added a public symbol: it has a doc comment.
 

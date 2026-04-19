@@ -285,7 +285,34 @@ a cluster-aware app in 15 minutes, without reading the source.
 
 ---
 
-## Phase 5 — Examples
+## Phase 5 — Examples ✅ done (and ongoing)
+
+**Shipped.** Initial set of 9 runnable example programs landed
+under `examples/`. Going forward, new significant features land
+together with the example that exercises them — see
+[CONTRIBUTING.md](CONTRIBUTING.md). Phase 5 is converted from a
+one-shot batch into a standing rule.
+
+| # | Directory | Demonstrates |
+|---|---|---|
+| 01 | `01-hello/` | strings, counters, hashes, hash field TTL, streams, consumer groups |
+| 02 | `02-cluster/` | all four Read_from modes; TLS template (managed + internal CA) |
+| 03 | `03-pubsub/` | publisher + 2 subscribers (channel + pattern), graceful shutdown |
+| 04 | `04-transaction/` | WATCH retry race on a balance |
+| 05 | `05-cache-aside/` | read-through with hash field TTL (Valkey 9+) |
+| 06 | `06-distributed-lock/` | SET NX EX + CAD release; not Redlock |
+| 07 | `07-task-queue/` | streams + consumer groups + XAUTOCLAIM reclaim |
+| 08 | `08-blocking-commands/` | BRPOP worker on a dedicated client |
+| 09 | `09-leaderboard/` | sorted-set leaderboard (uses Client.custom for ZADD/ZINCRBY pending typed wrappers) |
+
+While building these, two tasks fell out:
+  - Random replica selection inside `pick_node_by_read_from`
+    (was first-only, now properly randomised).
+  - ZADD / ZINCRBY / ZRANK / ZSCORE remain unwrapped — go through
+    `Client.custom`. A small batch to add typed sorted-set
+    wrappers will land before 1.0.
+
+
 
 **Goal.** Runnable, real-world-shaped programs in `examples/`. Each
 demonstrates one use case end-to-end, is small enough to read in

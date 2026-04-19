@@ -45,25 +45,37 @@ let port_of_node ~tls (node : Topology.Node.t) =
     | Some p -> Some p
     | None -> node.tls_port
 
+(* Randomised pick from a candidate list. Spreads readonly traffic
+   across replicas instead of pinning every read from one client to
+   the first replica. Uses the global Random module — for routing,
+   crypto-grade randomness isn't needed and the slight per-process
+   determinism is preferable to threading per-router RNG state.
+   Callers who care about distribution across processes can call
+   [Random.self_init ()] at startup. *)
+let pick_random nodes =
+  match nodes with
+  | [] -> None
+  | _ -> Some (List.nth nodes (Random.int (List.length nodes)))
+
 let pick_node_by_read_from (rf : Router.Read_from.t) (shard : Topology.Shard.t) =
-  let find_az az nodes =
-    List.find_opt
+  let in_az az nodes =
+    List.filter
       (fun (n : Topology.Node.t) -> n.availability_zone = Some az)
       nodes
   in
   match rf with
   | Router.Read_from.Primary -> shard.primary
   | Router.Read_from.Prefer_replica ->
-      (match shard.replicas with
-       | [] -> shard.primary
-       | r :: _ -> r)
+      (match pick_random shard.replicas with
+       | Some r -> r
+       | None -> shard.primary)
   | Router.Read_from.Az_affinity { az } ->
-      (match find_az az shard.replicas with
+      (match pick_random (in_az az shard.replicas) with
        | Some r -> r
        | None -> shard.primary)
   | Router.Read_from.Az_affinity_replicas_and_primary { az } ->
       let all_nodes = shard.primary :: shard.replicas in
-      (match find_az az all_nodes with
+      (match pick_random (in_az az all_nodes) with
        | Some n -> n
        | None -> shard.primary)
 

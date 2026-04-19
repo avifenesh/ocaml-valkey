@@ -1,0 +1,3 @@
+(executables
+ (names routing tls)
+ (libraries valkey eio_main))
