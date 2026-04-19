@@ -36,6 +36,8 @@ let read_bulk_body (r : byte_source) =
   else if len_s = "?" then err "streamed bulk strings not yet implemented"
   else
     let len = parse_int len_s in
+    if len < 0 then
+      err "bulk length must be non-negative, got %d" len;
     let body = r.take len in
     expect_crlf r;
     Some body
@@ -44,7 +46,11 @@ let read_count (r : byte_source) =
   let s = r.line () in
   if s = "-1" then `Null
   else if s = "?" then `Streamed
-  else `Count (parse_int s)
+  else
+    let n = parse_int s in
+    if n < 0 then
+      err "aggregate length must be non-negative, got %d" n
+    else `Count n
 
 let rec read (r : byte_source) : Resp3.t =
   match r.any_char () with
