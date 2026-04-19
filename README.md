@@ -35,17 +35,21 @@ Strings, counters, TTL, hashes, hash field TTL (Valkey 9), sets, lists, sorted s
 - Quorum-based topology discovery from seed addresses (parallel, configurable agreement ratio)
 - Canonical-SHA change detection — diffs the pool on every refresh
 - MOVED / ASK redirect retry (bounded, `ASKING` sent before the retried command on `ASK`)
+- CLUSTERDOWN / TRYAGAIN retry with short back-off
 - Periodic background refresh fiber (15 s base + jitter, wakes early when a redirect points at an unknown address)
 - Seed fallback when the live pool can no longer reach quorum
 - Typed `Read_from` strategies: `Primary`, `Prefer_replica`, AZ-affinity, AZ-affinity-with-primary
-- Routing `Target` types for `by_slot` / `by_node` / `random`
-- **Standalone = one-shard cluster** — single-node connections go through the same router behind a synthetic topology, so the dispatch path is unified
+- Routing `Target` types for `by_slot` / `by_node` / `random`; `Fan_target` for `All_nodes` / `All_primaries` / `All_replicas`
+- **Per-command default routing** (`Command_spec`) — a table of ~90 commands maps each name to a key position + readonly flag, so `Client.set "k" "v"` routes to `slot(k)`'s primary and `Client.get "k"` respects the caller's `Read_from`. Writes are forced to `Primary` regardless of user preference.
+- **Cluster-aware admin commands**: `script_load`, `script_flush`, `script_exists`, `keys` fan to every primary and aggregate (unanimous SHA, AND-reduced existence, flattened key lists) so they work identically in standalone and cluster.
+- **Explicit fan-out aggregation for `WAIT`**: `wait_replicas` (single primary), `wait_replicas_all` (per-node list), `wait_replicas_min`, `wait_replicas_sum`.
+- **Standalone = one-shard cluster** — single-node connections go through the same router behind a synthetic topology, so the dispatch path is unified.
 
 **Not yet shipped:**
 - Transactions (MULTI / EXEC / WATCH / DISCARD)
 - Pub/sub (SUBSCRIBE / SSUBSCRIBE family)
-- Cluster fan-out targets (`All_nodes`, `All_primaries`)
-- CLUSTERDOWN / TRYAGAIN retry policy
+- Cluster-wide SCAN helper (current `scan` iterates one primary)
+- "First primary to hit target wins" style fan-out (requires fiber cancellation)
 - Benchmarks, fuzzer
 
 See [ROADMAP](#roadmap) below.
@@ -185,13 +189,12 @@ This client is **multiplexed**. Sending a blocking command (BLPOP, BRPOP, BLMOVE
 
 Next major pieces, roughly in order:
 
-1. **Live cluster integration tests** — docker compose cluster, exercise MOVED / ASK / refresh / seed-fallback paths
-2. **CLUSTERDOWN / TRYAGAIN** retry policy with short back-off
-3. **Transactions** — MULTI / EXEC / WATCH / DISCARD with connection pinning under multiplex
-4. **Pub/sub** — SUBSCRIBE lifecycle, sharded variants, push dispatch
-5. **Fan-out routing** — `All_nodes` / `All_primaries` targets
-6. **Benchmarks** — 80/20 GET/SET across 100 B / 1 KiB / 16 KiB at 1 / 10 / 100 concurrency
-7. **Fuzzer** — RESP3 parser against arbitrary bytes
+1. **Live cluster integration tests** — docker compose cluster, exercise MOVED / ASK / refresh / seed-fallback / fan-out paths
+2. **Transactions** — MULTI / EXEC / WATCH / DISCARD with connection pinning under multiplex
+3. **Pub/sub** — SUBSCRIBE lifecycle, sharded variants, push dispatch
+4. **Cluster-wide SCAN** helper that walks every primary
+5. **Benchmarks** — 80/20 GET/SET across 100 B / 1 KiB / 16 KiB at 1 / 10 / 100 concurrency
+6. **Fuzzer** — RESP3 parser against arbitrary bytes
 
 ## License
 
