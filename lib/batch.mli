@@ -1,0 +1,126 @@
+(** Scatter-gather batch of commands.
+
+    A [Batch.t] is a list of queued commands that execute together.
+    Two modes, one primitive:
+
+    - **Non-atomic** ([atomic=false], the default) — commands are
+      bucketed by slot, each slot's bucket runs as a parallel
+      pipeline on that slot's connection, results are merged back
+      into input order. Each command gets its own result; partial
+      success is the norm. Across slots the operations are
+      concurrent and have no collective ordering. Within a single
+      slot the connection processes commands serially in the
+      order they were queued. Fan-out commands (SCRIPT LOAD,
+      FLUSHALL, CLUSTER NODES, …) are dispatched via
+      [Client.exec_multi] and their results carry per-node replies.
+
+    - **Atomic** ([atomic=true]) — every command must target the
+      same slot. The batch runs as a [MULTI] / [EXEC] block on
+      that slot's primary with optional [WATCH]. Replies arrive
+      as a single aggregate; [run] returns [Ok (Some array)] on
+      commit or [Ok None] on a WATCH abort. This is the same
+      primitive the [Transaction] module sits on top of.
+
+    {1 Choosing atomic vs non-atomic}
+
+    Atomic when the commands form one logical transaction over
+    keys in the same slot — counters that must update together, a
+    CAS retry loop, etc. Non-atomic for everything else: bulk
+    import, cache fan-in/out, heterogeneous fetches across the
+    cluster.
+
+    {1 Typed helpers}
+
+    Most users won't build a [Batch.t] directly — they'll call
+    [Client.mget_cluster], [Client.mset_cluster], etc. Those
+    helpers build a non-atomic batch under the hood, dispatch it,
+    and unwrap the per-command reply into the typed shape the
+    caller expects. *)
+
+type t
+
+(** Non-overlapping reasons [queue] may reject a command. *)
+type queue_error =
+  | Fan_out_in_atomic_batch of string
+  (** Atomic mode was selected but the queued command's
+      [Command_spec] is [Fan_primaries] or [Fan_all_nodes]. A
+      MULTI/EXEC block lives on one connection to one primary
+      and cannot atomically span the fleet. *)
+
+(** One entry's result in the batch outcome array.
+
+    - [One r] for single-target commands (keyed or keyless-random).
+    - [Many rs] for fan-out commands: one [(node_id, result)] per
+      primary or per node depending on [Command_spec]. Matches
+      the shape of [Client.exec_multi]. *)
+type batch_entry_result =
+  | One of (Resp3.t, Connection.Error.t) result
+  | Many of (string * (Resp3.t, Connection.Error.t) result) list
+
+val create :
+  ?atomic:bool ->
+  ?hint_key:string ->
+  ?watch:string list ->
+  unit -> t
+(** [hint_key] and [watch] only matter when [atomic=true]. In
+    atomic mode they pin the slot the transaction will run on
+    (see [Transaction]). [watch] is sent before [MULTI]. *)
+
+val is_atomic : t -> bool
+
+val queue : t -> string array -> (unit, queue_error) result
+(** Append a command to the batch. The caller must pattern-match
+    the [result]: when it's [Error], the command was not queued
+    and [run] won't reference it. *)
+
+val length : t -> int
+
+val run :
+  ?timeout:float ->
+  Client.t ->
+  t ->
+  (batch_entry_result array option, Connection.Error.t) result
+(** Execute the batch.
+
+    Non-atomic: always returns [Ok (Some results)] with one
+    entry per queued command in input order. Timed-out
+    sub-commands are filled with [One (Error Timeout)]; completed
+    ones keep their actual reply. [timeout] applies as a wall-
+    clock deadline to the whole batch; each in-flight command's
+    per-call timeout is computed against the remaining window.
+
+    Atomic: not yet implemented in 0.2 — returns
+    [Error (Terminal "Batch.run: atomic mode pending")]. Use
+    [Transaction] for now; the modules merge in a later version. *)
+
+(** {1 Cluster-aware typed helpers}
+
+    Convenience wrappers that build a non-atomic batch, run it,
+    and decode per-command replies into typed shapes. In
+    standalone mode these collapse to a pipeline on the one
+    connection; in cluster mode they split by slot and dispatch
+    in parallel. A single sub-command error propagates as a
+    whole-call [Error]; writes to other slots that completed
+    are not rolled back. *)
+
+val mget_cluster :
+  ?timeout:float ->
+  Client.t -> string list ->
+  ((string * string option) list, Connection.Error.t) result
+(** [MGET] that spans cluster slots. Returns
+    [(key, value option) list] in input order. *)
+
+val mset_cluster :
+  ?timeout:float ->
+  Client.t -> (string * string) list ->
+  (unit, Connection.Error.t) result
+(** [MSET] that spans cluster slots. Each slot's subset lands
+    atomically (server-side [MSET] is atomic); across slots the
+    updates interleave. *)
+
+val del_cluster :
+  ?timeout:float ->
+  Client.t -> string list ->
+  (int, Connection.Error.t) result
+(** [DEL] that spans cluster slots. Returns the total number of
+    keys actually removed (sum of per-slot counts). *)

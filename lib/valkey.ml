@@ -15,6 +15,7 @@ module Connection = Connection
 module Client = Client
 module Cluster_router = Cluster_router
 module Transaction = Transaction
+module Batch = Batch
 module Pubsub = Pubsub
 module Cluster_pubsub = Cluster_pubsub
 module Named_commands = Named_commands
