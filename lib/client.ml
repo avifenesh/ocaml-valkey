@@ -689,45 +689,57 @@ let member_score_pairs cmd items =
   in
   loop [] items
 
-type zadd_cond = Z_nx | Z_xx
-type zadd_compare = Z_gt | Z_lt
+type zadd_mode =
+  | Z_only_add
+  | Z_only_update
+  | Z_only_update_if_greater
+  | Z_only_update_if_less
+  | Z_add_or_update_if_greater
+  | Z_add_or_update_if_less
 
-let zadd_cond_args = function
-  | Some Z_nx -> [ "NX" ]
-  | Some Z_xx -> [ "XX" ]
+let zadd_mode_args = function
   | None -> []
+  | Some Z_only_add -> [ "NX" ]
+  | Some Z_only_update -> [ "XX" ]
+  | Some Z_only_update_if_greater -> [ "XX"; "GT" ]
+  | Some Z_only_update_if_less -> [ "XX"; "LT" ]
+  | Some Z_add_or_update_if_greater -> [ "GT" ]
+  | Some Z_add_or_update_if_less -> [ "LT" ]
 
-let zadd_compare_args = function
-  | Some Z_gt -> [ "GT" ]
-  | Some Z_lt -> [ "LT" ]
-  | None -> []
+(* Score formatting: %.17g preserves full IEEE-754 double round-trip
+   precision. Plain %g truncates to 6 significant digits, which
+   silently loses precision on real-world scores. Matches the
+   encoder in bin/fuzz_parser/. *)
+let fmt_score f = Printf.sprintf "%.17g" f
 
-let zadd ?timeout ?cond ?compare ?(ch = false) t key pairs =
+let zadd ?timeout ?mode ?(ch = false) t key pairs =
   let pair_args =
     List.concat_map
-      (fun (score, member) -> [ Printf.sprintf "%g" score; member ])
+      (fun (score, member) -> [ fmt_score score; member ])
       pairs
   in
   let args =
     Array.of_list
       ([ "ZADD"; key ]
-       @ zadd_cond_args cond
-       @ zadd_compare_args compare
+       @ zadd_mode_args mode
        @ (if ch then [ "CH" ] else [])
        @ pair_args)
   in
   match exec ?timeout t args with
   | Error e -> Error e
   | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  (* Server returns Null when ~mode aborts the operation entirely
+     (e.g. NX on a key whose every member already exists). Treat
+     as zero added so the typed return stays [int]. *)
+  | Ok Resp3.Null -> Ok 0
   | Ok v -> Error (protocol_violation "ZADD" v)
 
-let zadd_incr ?timeout ?cond ?compare t key ~score ~member =
+let zadd_incr ?timeout ?mode t key ~score ~member =
   let args =
     Array.of_list
       ([ "ZADD"; key ]
-       @ zadd_cond_args cond
-       @ zadd_compare_args compare
-       @ [ "INCR"; Printf.sprintf "%g" score; member ])
+       @ zadd_mode_args mode
+       @ [ "INCR"; fmt_score score; member ])
   in
   match exec ?timeout t args with
   | Error e -> Error e
@@ -740,7 +752,7 @@ let zadd_incr ?timeout ?cond ?compare t key ~score ~member =
 let zincrby ?timeout t key ~by ~member =
   match
     exec ?timeout t
-      [| "ZINCRBY"; key; Printf.sprintf "%g" by; member |]
+      [| "ZINCRBY"; key; fmt_score by; member |]
   with
   | Error e -> Error e
   | Ok v -> score_of_resp3 "ZINCRBY" v

@@ -429,103 +429,139 @@ val zcard :
   ?read_from:Read_from.t ->
   t -> string -> (int, Connection.Error.t) result
 
-(** ZADD options.
+(** ZADD modifier mode.
 
-    [Z_nx] / [Z_xx] are mutually exclusive: only-add-new or
-    only-update-existing.
+    valkey.io: [ZADD key [NX | XX] [GT | LT] [CH] [INCR] score
+    member [score member ...]]. The server enforces:
 
-    [Z_gt] / [Z_lt] are mutually exclusive: update only when the
-    new score is greater / less than the current one. They combine
-    with [Z_xx]; combining with [Z_nx] is rejected by the server. *)
-type zadd_cond = Z_nx | Z_xx
-type zadd_compare = Z_gt | Z_lt
+    - [NX | XX] are mutually exclusive.
+    - [GT | LT | NX] are mutually exclusive — i.e. NX cannot
+      combine with GT or LT.
+    - [GT] and [LT] are mutually exclusive with each other but
+      both can combine with [XX], and both can be used without
+      [XX] (in which case they still allow new elements to be
+      added; only existing-element updates are conditional).
+
+    The seven modes below cover every server-permitted
+    combination; illegal combinations are not expressible. *)
+type zadd_mode =
+  | Z_only_add                 (** [NX] — add new, never update. *)
+  | Z_only_update              (** [XX] — update existing, never add. *)
+  | Z_only_update_if_greater   (** [XX GT] *)
+  | Z_only_update_if_less      (** [XX LT] *)
+  | Z_add_or_update_if_greater (** [GT] — adds new, updates existing only if new > current. *)
+  | Z_add_or_update_if_less    (** [LT] — adds new, updates existing only if new < current. *)
 
 val zadd :
   ?timeout:float ->
-  ?cond:zadd_cond ->
-  ?compare:zadd_compare ->
+  ?mode:zadd_mode ->
   ?ch:bool ->
   t -> string -> (float * string) list ->
   (int, Connection.Error.t) result
-(** [ZADD key [NX|XX] [GT|LT] [CH] score member ...].
+(** valkey.io: [ZADD key [NX|XX] [GT|LT] [CH] score member [score member ...]].
 
-    Pairs are [(score, member)]. Returns the count of newly
-    inserted elements; with [~ch:true], the count of elements
-    whose score was added or changed (Valkey's CH modifier). *)
+    Pairs are [(score, member)]. Server replies (RESP3):
+
+    - Integer: count of newly inserted elements.
+    - Integer (with [~ch:true], i.e. CH modifier): count of
+      elements whose score was added OR changed.
+    - Null when [~mode] aborts the operation (e.g. NX on existing
+      key / XX on missing key). Surfaces as [Ok 0] here since the
+      typed return is [int]; if you need to distinguish "0 added,
+      no condition" from "aborted by mode", use [zadd_incr] or
+      [Client.custom]. *)
 
 val zadd_incr :
   ?timeout:float ->
-  ?cond:zadd_cond ->
-  ?compare:zadd_compare ->
+  ?mode:zadd_mode ->
   t -> string -> score:float -> member:string ->
   (float option, Connection.Error.t) result
-(** [ZADD key [NX|XX] [GT|LT] INCR score member]. Atomic
-    increment-or-create. Returns the new score on success;
-    [None] when [Z_nx]/[Z_xx]/[Z_gt]/[Z_lt] prevented the write
-    (server returns nil in that case). *)
+(** valkey.io: [ZADD key [NX|XX] [GT|LT] INCR score member].
+    Atomic increment-or-create. The server only permits one
+    score-member pair under [INCR]; this signature enforces it.
+
+    Returns the new score on success; [None] when [~mode]
+    prevented the write (server returns Null in that case). *)
 
 val zincrby :
   ?timeout:float ->
   t -> string -> by:float -> member:string ->
   (float, Connection.Error.t) result
-(** [ZINCRBY key by member]. Returns the new score after
-    increment. Creates the member at [by] if missing. *)
+(** valkey.io: [ZINCRBY key increment member]. Returns the new
+    score after the atomic increment. If the member doesn't
+    exist, it is added with [by] as its score. If the key
+    doesn't exist, a new sorted set is created. *)
 
 val zrem :
   ?timeout:float ->
   t -> string -> string list ->
   (int, Connection.Error.t) result
-(** [ZREM key member ...]. Returns count of members actually removed. *)
+(** valkey.io: [ZREM key member [member ...]]. Returns the count
+    of members actually removed; non-existing members are
+    silently ignored. Errors only when [key] holds a non-zset. *)
 
 val zrank :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> string ->
   (int option, Connection.Error.t) result
-(** [ZRANK key member]. Zero-based rank from low to high score.
-    [None] if the member is missing. *)
+(** valkey.io: [ZRANK key member]. Zero-based rank from low to
+    high score. Server returns Null when [member] is absent or
+    [key] doesn't exist; mapped to [None]. *)
 
 val zrank_with_score :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> string ->
   ((int * float) option, Connection.Error.t) result
-(** [ZRANK key member WITHSCORE] (Valkey 7.2+). *)
+(** valkey.io: [ZRANK key member WITHSCORE]. Available since
+    Valkey 7.2.0; older servers return an "ERR syntax" error.
+    Reply: Array of [Integer rank, Double score], or Null if
+    member is absent. *)
 
 val zrevrank :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> string ->
   (int option, Connection.Error.t) result
-(** [ZREVRANK key member]. Zero-based rank from high to low score. *)
+(** valkey.io: [ZREVRANK key member]. Zero-based rank from high
+    to low score. Null if member is missing. *)
 
 val zrevrank_with_score :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> string ->
   ((int * float) option, Connection.Error.t) result
+(** valkey.io: [ZREVRANK key member WITHSCORE] (Valkey 7.2+). *)
 
 val zscore :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> string ->
   (float option, Connection.Error.t) result
-(** [ZSCORE key member]. [None] if the member is missing. *)
+(** valkey.io: [ZSCORE key member]. RESP3 returns Double or Null.
+    [None] is returned when [member] is missing OR when [key]
+    doesn't exist (server returns nil in both cases). *)
 
 val zmscore :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> string list ->
   (float option list, Connection.Error.t) result
-(** [ZMSCORE key m1 m2 ...]. Returns one [Some/None] per requested
-    member, in order. *)
+(** valkey.io: [ZMSCORE key member [member ...]] (Valkey 6.2+).
+    Returns one [Some/None] per requested member, in input
+    order. If the whole [key] is missing, every member surfaces
+    as [None]. *)
 
 val zcount :
   ?timeout:float ->
   ?read_from:Read_from.t ->
   t -> string -> min:score_bound -> max:score_bound ->
   (int, Connection.Error.t) result
-(** [ZCOUNT key min max]. *)
+(** valkey.io: [ZCOUNT key min max]. Bounds use the
+    [score_bound] type ([Score], [Score_excl], [Score_neg_inf],
+    [Score_pos_inf]). Returns the count of members whose score
+    falls in the range. *)
 
 val zrange_with_scores :
   ?timeout:float ->
@@ -533,8 +569,10 @@ val zrange_with_scores :
   ?rev:bool ->
   t -> string -> start:int -> stop:int ->
   ((string * float) list, Connection.Error.t) result
-(** [ZRANGE key start stop [REV] WITHSCORES]. [(member, score)]
-    pairs in result order. *)
+(** valkey.io: [ZRANGE key start stop [REV] WITHSCORES] (Valkey
+    6.2+ unified ZRANGE). RESP3 reply is an array of
+    [[member, score]] pairs; this wrapper returns
+    [(member, score)] tuples in result order. *)
 
 val zrangebyscore_with_scores :
   ?timeout:float ->
@@ -542,22 +580,31 @@ val zrangebyscore_with_scores :
   ?limit:(int * int) ->
   t -> string -> min:score_bound -> max:score_bound ->
   ((string * float) list, Connection.Error.t) result
+(** valkey.io: [ZRANGEBYSCORE key min max WITHSCORES [LIMIT offset count]].
+    The unified [ZRANGE ... BYSCORE] form is recommended for new
+    code; this wrapper exists for parity with the older command
+    that callers may already be using. *)
 
 val zpopmin :
   ?timeout:float ->
   ?count:int ->
   t -> string ->
   ((string * float) list, Connection.Error.t) result
-(** [ZPOPMIN key [count]]. Removes and returns the lowest-score
-    member(s). Empty list when the key doesn't exist. *)
+(** valkey.io: [ZPOPMIN key [count]] (Valkey 5.0+). Removes and
+    returns the lowest-scored member(s).
+
+    Reply shape (RESP3):
+    - No [~count]: flat 2-elem array [member, score], or empty
+      array when the key is missing.
+    - With [~count]: array of [[member, score]] pairs. *)
 
 val zpopmax :
   ?timeout:float ->
   ?count:int ->
   t -> string ->
   ((string * float) list, Connection.Error.t) result
-(** [ZPOPMAX key [count]]. Removes and returns the highest-score
-    member(s). *)
+(** valkey.io: [ZPOPMAX key [count]]. Same semantics as
+    [zpopmin], but pops highest-scored members. *)
 
 (** {1 Scripting (Lua)} *)
 

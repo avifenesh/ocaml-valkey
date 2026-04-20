@@ -10,14 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added — typed sorted-set wrappers
 
 The leaderboard example surfaced this gap; the wrappers below
-replace the `Client.custom` calls that example was using:
+replace the `Client.custom` calls that example was using.
+**docs-first audit done against valkey.io for every command** —
+each `.mli` quotes the upstream syntax + version + reply shape.
 
-- `zadd` — with `?cond:Z_nx|Z_xx`, `?compare:Z_gt|Z_lt`, `?ch`.
-  Takes `(score, member) list`. Returns count of newly added
-  (or with `~ch:true`, count of added + score-changed).
+- `zadd` — `?mode:zadd_mode` is a single sum encoding every
+  server-permitted combination of NX/XX/GT/LT (server rejects
+  NX+GT, NX+LT, NX+XX, GT+LT — those are now type-impossible).
+  Six legal modes: `Z_only_add`, `Z_only_update`,
+  `Z_only_update_if_greater`, `Z_only_update_if_less`,
+  `Z_add_or_update_if_greater`, `Z_add_or_update_if_less`.
+  `?ch` toggles the CH modifier.
 - `zadd_incr` — separate function so the return type tracks the
-  reply. Returns `float option`: the new score on success,
-  `None` when NX/XX/GT/LT prevented the write.
+  reply. Single score-member pair enforced by signature (server
+  rejects multiple under INCR). Returns `float option`: the new
+  score on success, `None` when `~mode` prevented the write.
+- Score formatting uses `Printf.sprintf "%.17g"` for full
+  IEEE-754 round-trip precision (was `%g`, which truncated to 6
+  significant digits and silently lost data on real scores).
 - `zincrby` — atomic increment, returns the new score as `float`.
 - `zrem` — returns count of members actually removed.
 - `zrank` / `zrevrank` — `int option`, `None` when missing.

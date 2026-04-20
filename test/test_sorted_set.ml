@@ -61,24 +61,52 @@ let test_zadd_basic () =
     (match C.zcard c key with Ok n -> n
      | Error e -> Alcotest.failf "ZCARD: %a" E.pp e)
 
-let test_zadd_xx_nx () =
+let test_zadd_modes () =
   with_client @@ fun c ->
   let _ = C.del c [ key ] in
-  (* XX on a missing key adds nothing. *)
-  (match C.zadd c key ~cond:C.Z_xx [ 1.0, "ghost" ] with
+  (* XX (only-update) on a missing key adds nothing. *)
+  (match C.zadd c key ~mode:C.Z_only_update [ 1.0, "ghost" ] with
    | Ok 0 -> ()
    | Ok n -> Alcotest.failf "ZADD XX: expected 0, got %d" n
    | Error e -> Alcotest.failf "ZADD XX: %a" E.pp e);
-  (* Seed, then NX prevents updating an existing member. *)
+  (* Seed, then NX (only-add) doesn't update an existing member. *)
   let _ = C.zadd c key [ 5.0, "alice" ] in
-  (match C.zadd c key ~cond:C.Z_nx [ 9.0, "alice" ] with
-   | Ok 0 -> () (* no new addition *)
+  (match C.zadd c key ~mode:C.Z_only_add [ 9.0, "alice" ] with
+   | Ok 0 -> ()
    | Ok n -> Alcotest.failf "ZADD NX existing: expected 0, got %d" n
    | Error e -> Alcotest.failf "ZADD NX: %a" E.pp e);
   Alcotest.(check (float 1e-6)) "score unchanged" 5.0
     (unwrap_score "ZSCORE alice"
        (match C.zscore c key "alice" with
-        | Ok x -> x | Error e -> Alcotest.failf "ZSCORE: %a" E.pp e))
+        | Ok x -> x | Error e -> Alcotest.failf "ZSCORE: %a" E.pp e));
+  (* GT alone: adds new members AND updates if greater. Updates
+     "alice" 5 -> 10 (greater), adds new "bob". *)
+  (match
+     C.zadd c key ~mode:C.Z_add_or_update_if_greater
+       [ 10.0, "alice"; 3.0, "bob" ]
+   with
+   | Ok 1 -> () (* one new member added *)
+   | Ok n -> Alcotest.failf "ZADD GT: expected 1, got %d" n
+   | Error e -> Alcotest.failf "ZADD GT: %a" E.pp e);
+  Alcotest.(check (float 1e-6)) "alice updated to 10" 10.0
+    (unwrap_score "ZSCORE alice"
+       (match C.zscore c key "alice" with
+        | Ok x -> x | Error e -> Alcotest.failf "%a" E.pp e));
+  (* GT again with a smaller score: doesn't update. *)
+  let _ =
+    C.zadd c key ~mode:C.Z_add_or_update_if_greater [ 1.0, "alice" ]
+  in
+  Alcotest.(check (float 1e-6)) "alice still 10 (GT blocked)" 10.0
+    (unwrap_score "ZSCORE alice"
+       (match C.zscore c key "alice" with
+        | Ok x -> x | Error e -> Alcotest.failf "%a" E.pp e));
+  (* XX_GT: doesn't add new, conditional on greater. *)
+  (match
+     C.zadd c key ~mode:C.Z_only_update_if_greater [ 99.0, "carol" ]
+   with
+   | Ok 0 -> () (* carol doesn't exist; XX blocks add *)
+   | Ok n -> Alcotest.failf "ZADD XX GT new: expected 0, got %d" n
+   | Error e -> Alcotest.failf "%a" E.pp e)
 
 let test_zadd_ch () =
   with_client @@ fun c ->
@@ -110,7 +138,7 @@ let test_zadd_incr () =
    | _ -> Alcotest.fail "ZADD INCR cumulative");
   (* NX on existing -> None. *)
   (match
-     C.zadd_incr c key ~cond:C.Z_nx ~score:1.0 ~member:"x"
+     C.zadd_incr c key ~mode:C.Z_only_add ~score:1.0 ~member:"x"
    with
    | Ok None -> ()
    | _ -> Alcotest.fail "ZADD NX INCR existing: expected None")
@@ -228,7 +256,7 @@ let tests =
     else Alcotest.test_case name `Quick (skip_placeholder name)
   in
   [ tc "ZADD basic" test_zadd_basic;
-    tc "ZADD XX/NX" test_zadd_xx_nx;
+    tc "ZADD modes (NX/XX/GT/LT/XX_GT)" test_zadd_modes;
     tc "ZADD CH" test_zadd_ch;
     tc "ZADD INCR" test_zadd_incr;
     tc "ZINCRBY + ZSCORE" test_zincrby_zscore;
