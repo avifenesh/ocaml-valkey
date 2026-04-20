@@ -38,23 +38,13 @@ total players: 6
 | `ZRANGEBYSCORE` | All players in a score range                       |
 | `ZCARD`       | Total count                                          |
 
-## Why two APIs in this example
+## Typed end-to-end
 
-This library currently has typed wrappers for `ZRANGE`,
-`ZRANGEBYSCORE`, `ZREMRANGEBYSCORE`, and `ZCARD`. The other
-sorted-set commands (`ZADD`, `ZINCRBY`, `ZRANK`, `ZSCORE`) go
-through `Client.custom` for now — adding typed wrappers is on
-the to-do list.
-
-`Client.custom` always works:
-
-```ocaml
-match C.custom client [| "ZINCRBY"; board; "10"; "ada" |] with
-| Ok (Valkey.Resp3.Bulk_string new_score) -> ...
-| Error e -> ...
-```
-
-The reply needs decoding by hand. Typed wrappers do that for you.
+This example now uses typed wrappers throughout — `zadd`,
+`zincrby`, `zrange_with_scores`, `zrangebyscore_with_scores`,
+`zrevrank`, `zrevrank_with_score`, `zmscore`, `zcard`, `zpopmax`.
+No `Client.custom` calls; the score values come back as `float`
+already parsed.
 
 ## Pagination
 

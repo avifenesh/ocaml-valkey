@@ -429,6 +429,136 @@ val zcard :
   ?read_from:Read_from.t ->
   t -> string -> (int, Connection.Error.t) result
 
+(** ZADD options.
+
+    [Z_nx] / [Z_xx] are mutually exclusive: only-add-new or
+    only-update-existing.
+
+    [Z_gt] / [Z_lt] are mutually exclusive: update only when the
+    new score is greater / less than the current one. They combine
+    with [Z_xx]; combining with [Z_nx] is rejected by the server. *)
+type zadd_cond = Z_nx | Z_xx
+type zadd_compare = Z_gt | Z_lt
+
+val zadd :
+  ?timeout:float ->
+  ?cond:zadd_cond ->
+  ?compare:zadd_compare ->
+  ?ch:bool ->
+  t -> string -> (float * string) list ->
+  (int, Connection.Error.t) result
+(** [ZADD key [NX|XX] [GT|LT] [CH] score member ...].
+
+    Pairs are [(score, member)]. Returns the count of newly
+    inserted elements; with [~ch:true], the count of elements
+    whose score was added or changed (Valkey's CH modifier). *)
+
+val zadd_incr :
+  ?timeout:float ->
+  ?cond:zadd_cond ->
+  ?compare:zadd_compare ->
+  t -> string -> score:float -> member:string ->
+  (float option, Connection.Error.t) result
+(** [ZADD key [NX|XX] [GT|LT] INCR score member]. Atomic
+    increment-or-create. Returns the new score on success;
+    [None] when [Z_nx]/[Z_xx]/[Z_gt]/[Z_lt] prevented the write
+    (server returns nil in that case). *)
+
+val zincrby :
+  ?timeout:float ->
+  t -> string -> by:float -> member:string ->
+  (float, Connection.Error.t) result
+(** [ZINCRBY key by member]. Returns the new score after
+    increment. Creates the member at [by] if missing. *)
+
+val zrem :
+  ?timeout:float ->
+  t -> string -> string list ->
+  (int, Connection.Error.t) result
+(** [ZREM key member ...]. Returns count of members actually removed. *)
+
+val zrank :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string ->
+  (int option, Connection.Error.t) result
+(** [ZRANK key member]. Zero-based rank from low to high score.
+    [None] if the member is missing. *)
+
+val zrank_with_score :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string ->
+  ((int * float) option, Connection.Error.t) result
+(** [ZRANK key member WITHSCORE] (Valkey 7.2+). *)
+
+val zrevrank :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string ->
+  (int option, Connection.Error.t) result
+(** [ZREVRANK key member]. Zero-based rank from high to low score. *)
+
+val zrevrank_with_score :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string ->
+  ((int * float) option, Connection.Error.t) result
+
+val zscore :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string ->
+  (float option, Connection.Error.t) result
+(** [ZSCORE key member]. [None] if the member is missing. *)
+
+val zmscore :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> string list ->
+  (float option list, Connection.Error.t) result
+(** [ZMSCORE key m1 m2 ...]. Returns one [Some/None] per requested
+    member, in order. *)
+
+val zcount :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  t -> string -> min:score_bound -> max:score_bound ->
+  (int, Connection.Error.t) result
+(** [ZCOUNT key min max]. *)
+
+val zrange_with_scores :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  ?rev:bool ->
+  t -> string -> start:int -> stop:int ->
+  ((string * float) list, Connection.Error.t) result
+(** [ZRANGE key start stop [REV] WITHSCORES]. [(member, score)]
+    pairs in result order. *)
+
+val zrangebyscore_with_scores :
+  ?timeout:float ->
+  ?read_from:Read_from.t ->
+  ?limit:(int * int) ->
+  t -> string -> min:score_bound -> max:score_bound ->
+  ((string * float) list, Connection.Error.t) result
+
+val zpopmin :
+  ?timeout:float ->
+  ?count:int ->
+  t -> string ->
+  ((string * float) list, Connection.Error.t) result
+(** [ZPOPMIN key [count]]. Removes and returns the lowest-score
+    member(s). Empty list when the key doesn't exist. *)
+
+val zpopmax :
+  ?timeout:float ->
+  ?count:int ->
+  t -> string ->
+  ((string * float) list, Connection.Error.t) result
+(** [ZPOPMAX key [count]]. Removes and returns the highest-score
+    member(s). *)
+
 (** {1 Scripting (Lua)} *)
 
 val eval :

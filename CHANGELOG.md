@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — typed sorted-set wrappers
+
+The leaderboard example surfaced this gap; the wrappers below
+replace the `Client.custom` calls that example was using:
+
+- `zadd` — with `?cond:Z_nx|Z_xx`, `?compare:Z_gt|Z_lt`, `?ch`.
+  Takes `(score, member) list`. Returns count of newly added
+  (or with `~ch:true`, count of added + score-changed).
+- `zadd_incr` — separate function so the return type tracks the
+  reply. Returns `float option`: the new score on success,
+  `None` when NX/XX/GT/LT prevented the write.
+- `zincrby` — atomic increment, returns the new score as `float`.
+- `zrem` — returns count of members actually removed.
+- `zrank` / `zrevrank` — `int option`, `None` when missing.
+- `zrank_with_score` / `zrevrank_with_score` — Valkey 7.2+
+  WITHSCORE variant, returns `(int * float) option`.
+- `zscore` — `float option`, `None` when missing.
+- `zmscore` — multi-member; returns `float option list` parallel
+  to the input list.
+- `zcount` — count members in a score range.
+- `zrange_with_scores` / `zrangebyscore_with_scores` — return
+  `(string * float) list` instead of just members.
+- `zpopmin` / `zpopmax` — atomic pop with optional count;
+  returns `(string * float) list`.
+
+Score parsing handles both RESP3 `Double` and `Bulk_string`
+shapes (different commands and server versions emit different
+encodings).
+
+`examples/09-leaderboard/` is now typed end-to-end (no
+`Client.custom` left).
+
 ### Added — Phase 5 (examples)
 
 - Initial set of 9 runnable example programs under `examples/`:

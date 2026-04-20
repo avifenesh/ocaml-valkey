@@ -12,6 +12,7 @@ let () =
       "command_spec", Test_command_spec.tests;
       "connection (needs docker valkey :6379)", Test_connection.tests;
       "client (needs docker valkey :6379)", Test_client.tests;
+      "sorted set (needs docker valkey :6379)", Test_sorted_set.tests;
       "transaction (needs docker valkey :6379)", Test_transaction.tests;
       "pubsub (needs docker valkey :6379)", Test_pubsub.tests;
       "named_commands (needs docker valkey :6379)", Test_named_commands.tests;

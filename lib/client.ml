@@ -659,6 +659,225 @@ let zcard ?timeout ?read_from t key =
   | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
   | Ok v -> Error (protocol_violation "ZCARD" v)
 
+(* Score in RESP3 may arrive as Double or as Bulk_string,
+   depending on server version + command. Handle both. *)
+let score_of_resp3 cmd = function
+  | Resp3.Double f -> Ok f
+  | Resp3.Bulk_string s ->
+      (try Ok (float_of_string s)
+       with _ -> Error (protocol_violation cmd (Resp3.Bulk_string s)))
+  | Resp3.Integer n -> Ok (Int64.to_float n)
+  | v -> Error (protocol_violation cmd v)
+
+let score_opt_of_resp3 cmd = function
+  | Resp3.Null -> Ok None
+  | v ->
+      match score_of_resp3 cmd v with
+      | Ok f -> Ok (Some f)
+      | Error e -> Error e
+
+(* ZRANGE WITHSCORES / ZRANGEBYSCORE WITHSCORES / ZPOPMIN / ZPOPMAX
+   all return Array of [Array [member; score]] in RESP3. *)
+let member_score_pairs cmd items =
+  let rec loop acc = function
+    | [] -> Ok (List.rev acc)
+    | Resp3.Array [ Resp3.Bulk_string m; score_v ] :: rest ->
+        (match score_of_resp3 cmd score_v with
+         | Ok s -> loop ((m, s) :: acc) rest
+         | Error e -> Error e)
+    | other :: _ -> Error (protocol_violation cmd other)
+  in
+  loop [] items
+
+type zadd_cond = Z_nx | Z_xx
+type zadd_compare = Z_gt | Z_lt
+
+let zadd_cond_args = function
+  | Some Z_nx -> [ "NX" ]
+  | Some Z_xx -> [ "XX" ]
+  | None -> []
+
+let zadd_compare_args = function
+  | Some Z_gt -> [ "GT" ]
+  | Some Z_lt -> [ "LT" ]
+  | None -> []
+
+let zadd ?timeout ?cond ?compare ?(ch = false) t key pairs =
+  let pair_args =
+    List.concat_map
+      (fun (score, member) -> [ Printf.sprintf "%g" score; member ])
+      pairs
+  in
+  let args =
+    Array.of_list
+      ([ "ZADD"; key ]
+       @ zadd_cond_args cond
+       @ zadd_compare_args compare
+       @ (if ch then [ "CH" ] else [])
+       @ pair_args)
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "ZADD" v)
+
+let zadd_incr ?timeout ?cond ?compare t key ~score ~member =
+  let args =
+    Array.of_list
+      ([ "ZADD"; key ]
+       @ zadd_cond_args cond
+       @ zadd_compare_args compare
+       @ [ "INCR"; Printf.sprintf "%g" score; member ])
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok Resp3.Null -> Ok None
+  | Ok v ->
+      (match score_of_resp3 "ZADD INCR" v with
+       | Ok f -> Ok (Some f)
+       | Error e -> Error e)
+
+let zincrby ?timeout t key ~by ~member =
+  match
+    exec ?timeout t
+      [| "ZINCRBY"; key; Printf.sprintf "%g" by; member |]
+  with
+  | Error e -> Error e
+  | Ok v -> score_of_resp3 "ZINCRBY" v
+
+let zrem ?timeout t key members =
+  let args = Array.of_list ([ "ZREM"; key ] @ members) in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "ZREM" v)
+
+let zrank_base cmd ?timeout ?read_from t key member =
+  match exec ?timeout ?read_from t [| cmd; key; member |] with
+  | Error e -> Error e
+  | Ok Resp3.Null -> Ok None
+  | Ok (Resp3.Integer n) -> Ok (Some (Int64.to_int n))
+  | Ok v -> Error (protocol_violation cmd v)
+
+let zrank_with_score_base cmd ?timeout ?read_from t key member =
+  match
+    exec ?timeout ?read_from t [| cmd; key; member; "WITHSCORE" |]
+  with
+  | Error e -> Error e
+  | Ok Resp3.Null -> Ok None
+  | Ok (Resp3.Array [ Resp3.Integer rank; score_v ]) ->
+      (match score_of_resp3 cmd score_v with
+       | Ok s -> Ok (Some (Int64.to_int rank, s))
+       | Error e -> Error e)
+  | Ok v -> Error (protocol_violation cmd v)
+
+let zrank ?timeout ?read_from t key member =
+  zrank_base "ZRANK" ?timeout ?read_from t key member
+
+let zrank_with_score ?timeout ?read_from t key member =
+  zrank_with_score_base "ZRANK" ?timeout ?read_from t key member
+
+let zrevrank ?timeout ?read_from t key member =
+  zrank_base "ZREVRANK" ?timeout ?read_from t key member
+
+let zrevrank_with_score ?timeout ?read_from t key member =
+  zrank_with_score_base "ZREVRANK" ?timeout ?read_from t key member
+
+let zscore ?timeout ?read_from t key member =
+  match exec ?timeout ?read_from t [| "ZSCORE"; key; member |] with
+  | Error e -> Error e
+  | Ok v -> score_opt_of_resp3 "ZSCORE" v
+
+let zmscore ?timeout ?read_from t key members =
+  let args = Array.of_list ([ "ZMSCORE"; key ] @ members) in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      let rec loop acc = function
+        | [] -> Ok (List.rev acc)
+        | v :: rest ->
+            (match score_opt_of_resp3 "ZMSCORE" v with
+             | Ok x -> loop (x :: acc) rest
+             | Error e -> Error e)
+      in
+      loop [] items
+  | Ok v -> Error (protocol_violation "ZMSCORE" v)
+
+let zcount ?timeout ?read_from t key ~min ~max =
+  match
+    exec ?timeout ?read_from t
+      [| "ZCOUNT"; key;
+         score_bound_to_string min; score_bound_to_string max |]
+  with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "ZCOUNT" v)
+
+let zrange_with_scores ?timeout ?read_from ?(rev = false) t key
+    ~start ~stop =
+  let base =
+    [ "ZRANGE"; key; string_of_int start; string_of_int stop ]
+  in
+  let args =
+    Array.of_list
+      (base
+       @ (if rev then [ "REV" ] else [])
+       @ [ "WITHSCORES" ])
+  in
+  match exec ?timeout ?read_from t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      member_score_pairs "ZRANGE WITHSCORES" items
+  | Ok v -> Error (protocol_violation "ZRANGE WITHSCORES" v)
+
+let zrangebyscore_with_scores ?timeout ?read_from ?limit t key
+    ~min ~max =
+  let base =
+    [ "ZRANGEBYSCORE"; key;
+      score_bound_to_string min; score_bound_to_string max;
+      "WITHSCORES" ]
+  in
+  let limit_a =
+    match limit with
+    | None -> []
+    | Some (off, count) ->
+        [ "LIMIT"; string_of_int off; string_of_int count ]
+  in
+  match exec ?timeout ?read_from t (Array.of_list (base @ limit_a)) with
+  | Error e -> Error e
+  | Ok (Resp3.Array items) ->
+      member_score_pairs "ZRANGEBYSCORE WITHSCORES" items
+  | Ok v ->
+      Error (protocol_violation "ZRANGEBYSCORE WITHSCORES" v)
+
+let zpop_base cmd ?timeout ?count t key =
+  let args =
+    match count with
+    | None -> [| cmd; key |]
+    | Some n -> [| cmd; key; string_of_int n |]
+  in
+  match exec ?timeout t args with
+  | Error e -> Error e
+  | Ok (Resp3.Array []) -> Ok []
+  | Ok (Resp3.Array items) ->
+      (* Two reply shapes:
+         - ZPOPMIN key (no count) on a non-empty key returns
+           [Bulk_string member; score] (a flat 2-elem array).
+         - ZPOPMIN key COUNT returns Array of [member; score] pairs. *)
+      (match items with
+       | [ Resp3.Bulk_string m; score_v ] ->
+           (match score_of_resp3 cmd score_v with
+            | Ok s -> Ok [ (m, s) ]
+            | Error e -> Error e)
+       | _ -> member_score_pairs cmd items)
+  | Ok v -> Error (protocol_violation cmd v)
+
+let zpopmin ?timeout ?count t key =
+  zpop_base "ZPOPMIN" ?timeout ?count t key
+
+let zpopmax ?timeout ?count t key =
+  zpop_base "ZPOPMAX" ?timeout ?count t key
+
 (* ---------- scripting ---------- *)
 
 let eval_like cmd ?timeout t ~code ~keys ~args =
