@@ -442,9 +442,14 @@ Deferred to 0.3:
   - `pfcount_cluster` — needs HLL merge support, not a simple
     sum; sum over-counts across slots.
   - Fold `Transaction` into a facade over `Batch ~atomic:true`.
-  - Concurrent atomic batches on one router — requires a
-    connection-pool layer (Phase 9) to avoid MULTI interleaving
-    on the shared pinned connection.
+
+Concurrent atomic batches on one router are **now safe** — the
+router exposes a per-primary mutex (`atomic_lock_for_slot`) that
+serialises MULTI/EXEC blocks on the shared pinned connection.
+Non-atomic traffic bypasses it. A real connection pool (Phase 9)
+will later let atomic ops against the same primary run on
+different connections in parallel; the router's API doesn't
+change when that lands.
 
 
 

@@ -60,6 +60,9 @@ let raw_connection t =
 
 let connection_for_slot t slot = Router.connection_for_slot t.router slot
 
+let atomic_lock_for_slot t slot =
+  Router.atomic_lock_for_slot t.router slot
+
 let exec ?timeout ?target ?read_from t args =
   let user_rf = Option.value read_from ~default:t.config.read_from in
   match target with

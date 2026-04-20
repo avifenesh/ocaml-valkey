@@ -220,31 +220,32 @@ let run_atomic ?timeout:_ client t =
                           "atomic batch: no live connection for slot %d"
                           slot))
               | Some conn ->
-                  let send () =
-                    (* WATCH first (if any), then MULTI, then all
-                       queued commands (server replies +QUEUED or
-                       error), then EXEC returning an array (or Null
-                       on WATCH abort). Each step is serial on the
-                       same connection to preserve MULTI ordering. *)
-                    let watch_result =
-                      match t.watch with
-                      | [] -> Ok ()
-                      | keys ->
-                          request_ok conn
-                            (Array.of_list ("WATCH" :: keys))
-                    in
-                    match watch_result with
-                    | Error e -> Error e
-                    | Ok () ->
-                        (match request_ok conn [| "MULTI" |] with
-                         | Error e -> Error e
-                         | Ok () ->
-                             queue_all conn queued;
-                             match Connection.request conn [| "EXEC" |] with
-                             | Error e -> Error e
-                             | Ok v -> decode_exec_reply ~expected_n v)
-                  in
-                  send ()))
+                  (* Serialise concurrent atomic ops on the same
+                     primary connection so their MULTI/EXEC blocks
+                     don't interleave. Non-atomic pipeline traffic
+                     on the same connection is unaffected — it
+                     doesn't acquire this mutex. *)
+                  let mutex = Client.atomic_lock_for_slot client slot in
+                  Eio.Mutex.use_rw ~protect:true mutex (fun () ->
+                      let watch_result =
+                        match t.watch with
+                        | [] -> Ok ()
+                        | keys ->
+                            request_ok conn
+                              (Array.of_list ("WATCH" :: keys))
+                      in
+                      match watch_result with
+                      | Error e -> Error e
+                      | Ok () ->
+                          (match request_ok conn [| "MULTI" |] with
+                           | Error e -> Error e
+                           | Ok () ->
+                               queue_all conn queued;
+                               match
+                                 Connection.request conn [| "EXEC" |]
+                               with
+                               | Error e -> Error e
+                               | Ok v -> decode_exec_reply ~expected_n v))))
 
 let run ?timeout client t =
   if t.atomic then run_atomic ?timeout client t

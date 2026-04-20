@@ -46,6 +46,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/batch.md` — concept, atomic vs non-atomic semantics,
   timeout, ordering, typed helpers, WATCH caveat.
 
+### Changed — router
+
+- `Router.t` gained `atomic_lock_for_slot : int -> Eio.Mutex.t`.
+  Serialises concurrent atomic operations (both
+  `Batch ~atomic:true` and `Transaction`) on the same primary
+  connection so their MULTI/EXEC blocks no longer interleave.
+  Non-atomic traffic bypasses the lock and continues to
+  multiplex at full speed. Per-primary (not per-slot): ops on
+  different primaries run in parallel; ops on slots sharing a
+  primary queue behind each other. Standalone uses a single
+  mutex across all slots.
+- `Transaction.begin_` now acquires the mutex before
+  `WATCH`/`MULTI`; `exec` / `discard` release it. Leaking a
+  transaction without `exec`/`discard` now also leaks the lock
+  — same failure-mode class as the pre-existing leak of
+  server-side MULTI state, so no user-visible regression for
+  correctly-written callers.
+
 ### Known limitations
 
 - `Batch.create ~watch:...` sends `WATCH` at `run` time alongside
@@ -58,10 +76,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pfcount_cluster` is intentionally not provided — summing
   per-slot `PFCOUNT` values over-counts union cardinality when
   the same element appears in HLLs spread across slots.
-- Concurrent atomic batches on the **same** router share per-slot
-  connections and their `MULTI` calls interleave. Workaround
-  today: one atomic batch per router, or wait for the Phase 9
-  connection-pool layer.
 
 ## [0.1.0] — 2026-04-20
 

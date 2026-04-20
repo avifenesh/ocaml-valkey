@@ -221,6 +221,40 @@ let test_atomic_watch_abort () =
   let _ = C.del client [ k ] in
   ()
 
+(* Before the per-primary atomic-lock: two fibers running atomic
+   batches through the same router would step on each other's
+   MULTI ("Command 'multi' not allowed inside a transaction" +
+   EXECABORT). With the lock in place, they queue behind each
+   other and both commit. *)
+let test_atomic_concurrent () =
+  with_cluster_client @@ fun client ->
+  let a_key = "atomic:race:{a}" in
+  let b_key = "atomic:race:{b}" in
+  let _ = C.del client [ a_key; b_key ] in
+
+  let run_one ~key =
+    let b = B.create ~atomic:true ~hint_key:key () in
+    let _ = B.queue b [| "SET"; key; "one" |] in
+    let _ = B.queue b [| "INCR"; key ^ ":ctr" |] in
+    B.run client b
+  in
+
+  let r1 = ref (Ok None) in
+  let r2 = ref (Ok None) in
+  Eio.Fiber.both
+    (fun () -> r1 := run_one ~key:a_key)
+    (fun () -> r2 := run_one ~key:b_key);
+
+  (match !r1, !r2 with
+   | Ok (Some _), Ok (Some _) -> ()
+   | Ok None, _ | _, Ok None ->
+       Alcotest.fail "unexpected WATCH abort (no WATCH set)"
+   | Error e, _ | _, Error e ->
+       Alcotest.failf "concurrent atomic batch failed: %a" err_pp e);
+
+  let _ = C.del client [ a_key; b_key; a_key ^ ":ctr"; b_key ^ ":ctr" ] in
+  ()
+
 let skip_placeholder name () =
   Printf.printf
     "[skipped] %s (cluster unreachable; docker-compose.cluster.yml)\n%!"
@@ -243,4 +277,6 @@ let tests =
     tc "atomic batch CROSSSLOT detected at run time"
       test_atomic_crossslot_detected;
     tc "atomic batch WATCH abort returns Ok None" test_atomic_watch_abort;
+    tc "concurrent atomic batches on same router both commit"
+      test_atomic_concurrent;
   ]

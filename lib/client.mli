@@ -41,6 +41,14 @@ val connection_for_slot : t -> int -> Connection.t option
     single connection. Used by modules like [Transaction] that need
     to pin a sequence of commands to one server. *)
 
+val atomic_lock_for_slot : t -> int -> Eio.Mutex.t
+(** Mutex serialising atomic operations (MULTI/EXEC blocks from
+    {!Batch} with [~atomic:true], and from {!Transaction}) on the
+    primary that owns [slot]. Concurrent atomic ops on the same
+    primary queue behind each other; ops on different primaries
+    run in parallel; non-atomic pipeline traffic bypasses it. Held
+    for the duration of a single WATCH/MULTI/EXEC window. *)
+
 val exec :
   ?timeout:float ->
   ?target:Target.t ->

@@ -1,20 +1,18 @@
 (* Atomic batch: commit path.
 
-   Queues a read-modify-write triple and runs it as MULTI/EXEC on
-   one slot. No WATCH in the demo — see the note below for why.
+   Queues SET NX + INCR + INCR + GET against keys co-located via
+   a hashtag, runs it as MULTI/EXEC on one primary.
 
-   {1 WATCH in buffered atomic Batch}
+   Concurrent atomic batches on the same router are safe today —
+   the router serialises them via a per-primary mutex inside
+   [Router.atomic_lock_for_slot]. See [test/test_batch.ml]'s
+   [test_atomic_concurrent] for a functional exercise.
 
-   The [~watch] parameter exists on [Batch.create], but in the
-   current buffered model WATCH is sent at [run] time alongside
-   MULTI, so it only protects the submillisecond window between
-   [WATCH] and [EXEC]. For the classic "read value, decide what
-   to write, WATCH-guarded commit" pattern, use [Transaction]
-   today (where WATCH is sent at [begin_], giving you a real
-   window to read + compute before [exec]).
-
-   A future version will add a [Batch.watch] call that sends
-   WATCH immediately, restoring the familiar semantics to the
+   WATCH is not shown here: [Batch.create ~watch] sends WATCH at
+   [run] time alongside MULTI, which gives a submillisecond
+   protection window and isn't the classic "read, decide, commit"
+   flow. Use [Transaction] today for that pattern; a future
+   [Batch.watch] call will restore the familiar semantics to the
    buffered API. *)
 
 module B = Valkey.Batch

@@ -299,6 +299,32 @@ let endpoint_for_slot_via ~topology_ref ~prefer_hostname
           Some (shard.primary.id, host, port)
       | _ -> None
 
+(* Per-primary mutex table for atomic-batch serialisation. The
+   key is the primary's node_id (stable across refreshes for
+   unchanged nodes). Lazily grown; the guard mutex protects the
+   hashtable from concurrent insert races. See Router.mli
+   [atomic_lock_for_slot]. *)
+let make_atomic_lock_table () =
+  let locks : (string, Eio.Mutex.t) Hashtbl.t = Hashtbl.create 16 in
+  let guard = Eio.Mutex.create () in
+  fun primary_id ->
+    Eio.Mutex.use_rw ~protect:true guard (fun () ->
+        match Hashtbl.find_opt locks primary_id with
+        | Some m -> m
+        | None ->
+            let m = Eio.Mutex.create () in
+            Hashtbl.add locks primary_id m;
+            m)
+
+let atomic_lock_for_slot_via ~topology_ref ~for_primary slot =
+  match Topology.shard_for_slot !topology_ref slot with
+  | Some shard -> for_primary shard.primary.id
+  | None ->
+      (* Slot is unowned in the current topology. The atomic op
+         will fail when it asks for the connection; return a
+         throwaway mutex so the lookup itself doesn't raise. *)
+      Eio.Mutex.create ()
+
 let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
   let topology_ref = ref topology in
   let trigger_refresh () = () in
@@ -325,8 +351,12 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
       ~connection_config:Connection.Config.default
       slot
   in
+  let for_primary = make_atomic_lock_table () in
+  let atomic_lock_for_slot slot =
+    atomic_lock_for_slot_via ~topology_ref ~for_primary slot
+  in
   Router.make ~exec ~exec_multi ~close ~primary ~connection_for_slot
-    ~endpoint_for_slot
+    ~endpoint_for_slot ~atomic_lock_for_slot
 
 (* ---------- refresh fiber ---------- *)
 
@@ -517,8 +547,14 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
           ~connection_config:cfg.connection
           slot
       in
+      let for_primary = make_atomic_lock_table () in
+      let atomic_lock_for_slot slot =
+        sync_ref ();
+        atomic_lock_for_slot_via ~topology_ref ~for_primary slot
+      in
       Ok (Router.make ~exec ~exec_multi ~close ~primary
-            ~connection_for_slot ~endpoint_for_slot)
+            ~connection_for_slot ~endpoint_for_slot
+            ~atomic_lock_for_slot)
 
 module For_testing = struct
   let handle_retries = handle_retries

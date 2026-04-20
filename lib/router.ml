@@ -34,6 +34,13 @@ type exec_multi_fn =
 type connection_for_slot_fn = int -> Connection.t option
 type endpoint_for_slot_fn = int -> (string * string * int) option
 
+(* Per-slot mutex used to serialize atomic operations (MULTI/EXEC
+   blocks from [Batch ~atomic:true] and [Transaction]) on the
+   shared primary connection for that slot. Non-atomic traffic
+   bypasses the mutex and continues to multiplex normally. See
+   docs/batch.md for the underlying reason. *)
+type atomic_lock_for_slot_fn = int -> Eio.Mutex.t
+
 type t = {
   exec : exec_fn;
   exec_multi : exec_multi_fn;
@@ -41,13 +48,15 @@ type t = {
   primary : unit -> Connection.t option;
   connection_for_slot : connection_for_slot_fn;
   endpoint_for_slot : endpoint_for_slot_fn;
+  atomic_lock_for_slot : atomic_lock_for_slot_fn;
 }
 [@@warning "-69"]
 
 let make ~exec ~exec_multi ~close ~primary ~connection_for_slot
-    ~endpoint_for_slot =
+    ~endpoint_for_slot ~atomic_lock_for_slot =
   { exec; exec_multi; close; primary;
-    connection_for_slot; endpoint_for_slot }
+    connection_for_slot; endpoint_for_slot;
+    atomic_lock_for_slot }
 
 let standalone (conn : Connection.t) : t =
   let exec ?timeout _target _read_from args =
@@ -56,15 +65,14 @@ let standalone (conn : Connection.t) : t =
   let exec_multi ?timeout _fan_target args =
     [ Topology.standalone_node_id, Connection.request ?timeout conn args ]
   in
-  (* Standalone has no topology of its own; [Cluster_pubsub] uses
-     [endpoint_for_slot] and is cluster-only, so [None] here is
-     appropriate — callers must not reach for endpoint info on a
-     standalone router. *)
+  (* One connection → one mutex shared by every slot. *)
+  let atomic_mutex = Eio.Mutex.create () in
   { exec; exec_multi;
     close = (fun () -> Connection.close conn);
     primary = (fun () -> Some conn);
     connection_for_slot = (fun _ -> Some conn);
     endpoint_for_slot = (fun _ -> None);
+    atomic_lock_for_slot = (fun _ -> atomic_mutex);
   }
 
 let exec ?timeout t target rf args = t.exec ?timeout target rf args
@@ -73,3 +81,4 @@ let close t = t.close ()
 let primary_connection t = t.primary ()
 let connection_for_slot t slot = t.connection_for_slot slot
 let endpoint_for_slot t slot = t.endpoint_for_slot slot
+let atomic_lock_for_slot t slot = t.atomic_lock_for_slot slot

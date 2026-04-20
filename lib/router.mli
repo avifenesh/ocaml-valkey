@@ -65,6 +65,7 @@ val make :
   primary:(unit -> Connection.t option) ->
   connection_for_slot:connection_for_slot_fn ->
   endpoint_for_slot:endpoint_for_slot_fn ->
+  atomic_lock_for_slot:(int -> Eio.Mutex.t) ->
   t
 
 val standalone : Connection.t -> t
@@ -95,3 +96,16 @@ val endpoint_for_slot : t -> int -> (string * string * int) option
 (** Returns [Some (primary_id, host, port)] of the current primary
     for [slot], or [None] if the slot is unowned in the router's
     topology. *)
+
+val atomic_lock_for_slot : t -> int -> Eio.Mutex.t
+(** Mutex to acquire for the duration of an atomic operation
+    (MULTI/EXEC block) on the primary that owns [slot]. Serialises
+    concurrent atomic batches and transactions on the same shared
+    connection, preventing protocol corruption from interleaved
+    MULTI/EXEC state.
+
+    Non-atomic commands do not need to acquire this lock — they
+    pipeline through the same connection without taking per-op
+    state. In a cluster, slots that map to different primaries
+    return different mutexes so their atomic ops run in parallel;
+    slots on the same primary share one mutex and serialise. *)

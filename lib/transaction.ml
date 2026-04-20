@@ -8,6 +8,11 @@ type t = {
   (* Slot the transaction is pinned to (None for standalone). Every
      queued command must hash here or the server returns CROSSSLOT. *)
   pinned_slot : int option;
+  (* Mutex serialising atomic ops on this primary's connection,
+     held from [begin_] through the first [exec]/[discard]. See
+     [Router.atomic_lock_for_slot]. *)
+  atomic_lock : Eio.Mutex.t;
+  mutable lock_held : bool;
 }
 
 let protocol_violation cmd v =
@@ -46,10 +51,29 @@ let resolve_connection client hint_key =
                     (owner of hint_key %S)"
                    slot key)))
 
+let release_lock t =
+  if t.lock_held then begin
+    t.lock_held <- false;
+    Eio.Mutex.unlock t.atomic_lock
+  end
+
 let begin_ ?hint_key ?(watch = []) client =
   match resolve_connection client hint_key with
   | Error e -> Error e
   | Ok (conn, pinned_slot) ->
+      (* Serialise concurrent transactions on the same primary
+         connection: held from here through [exec] or [discard].
+         Non-atomic traffic on the same connection doesn't acquire
+         this lock, so it continues to multiplex normally. *)
+      let atomic_lock =
+        Client.atomic_lock_for_slot client
+          (match pinned_slot with Some s -> s | None -> 0)
+      in
+      Eio.Mutex.lock atomic_lock;
+      let t =
+        { conn; state = Open; pinned_slot;
+          atomic_lock; lock_held = true }
+      in
       let watch_result =
         match watch with
         | [] -> Ok ()
@@ -58,11 +82,11 @@ let begin_ ?hint_key ?(watch = []) client =
             expect_ok "WATCH" conn args
       in
       (match watch_result with
-       | Error e -> Error e
+       | Error e -> release_lock t; Error e
        | Ok () ->
            (match expect_ok "MULTI" conn [| "MULTI" |] with
-            | Error e -> Error e
-            | Ok () -> Ok { conn; state = Open; pinned_slot }))
+            | Error e -> release_lock t; Error e
+            | Ok () -> Ok t))
 
 let ensure_open t =
   match t.state with
@@ -103,6 +127,7 @@ let exec t =
         | Ok v -> parse_exec_reply v
       in
       t.state <- Finished;
+      release_lock t;
       result
 
 let discard t =
@@ -111,6 +136,7 @@ let discard t =
   | Ok () ->
       let result = expect_ok "DISCARD" t.conn [| "DISCARD" |] in
       t.state <- Finished;
+      release_lock t;
       result
 
 let with_transaction ?hint_key ?watch client f =
