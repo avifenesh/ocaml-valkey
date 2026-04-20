@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Transaction folded into Batch
+
+- `Valkey.Transaction` is now a thin wrapper over atomic
+  {!Batch}: `begin_` with `~watch:` opens a `Batch.guard` (so
+  the watched primary's atomic mutex is held across the user's
+  code); `queue` appends to a buffered `Batch.t ~atomic:true`;
+  `exec` runs the whole block via `Batch.run_with_guard` (or
+  `Batch.run` when there's no watch). One primitive, one mental
+  model.
+- Behaviour shift: bad-arity / unknown-command errors surface
+  inside the per-command replies returned by `exec` (as
+  `Resp3.Simple_error _`) or via EXECABORT, not at `queue`
+  time. Fan-out commands are still rejected at `queue` with a
+  `Terminal` error.
+- Concurrent transactions on the same primary now serialise at
+  `exec` time (via the router's per-primary atomic mutex). Local
+  `queue` calls on different handles never contend. Non-atomic
+  traffic continues to multiplex as before.
+- `Batch.validate_same_slot` now compares *connections*, not
+  slot numbers: standalone (one conn for every slot) and
+  co-located keys within one primary both pass through, only
+  true cross-primary batches fail CROSSSLOT.
+
 ### Added — Batch.watch (read-modify-write CAS)
 
 - `Valkey.Batch.with_watch` — scoped WATCH guard for the classic

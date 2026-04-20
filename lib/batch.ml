@@ -130,9 +130,16 @@ let atomic_slot t =
                 "atomic batch: no hint_key and no queued command has a \
                  key — cannot determine target slot"))
 
-(* Validate every queued command's key hashes to [slot]. Returns
-   [Error] with a CROSSSLOT-style message on the first mismatch. *)
-let validate_same_slot ~slot queued =
+(* Validate every queued command's key resolves to the same
+   connection as the pinned slot. We compare *connections*, not
+   slot numbers: in standalone mode the router returns the sole
+   connection for any slot (so every key trivially matches); in
+   cluster mode, co-located keys (same primary) also share a
+   connection even if they land on different slots within that
+   primary. Only true cross-primary batches fail. Returns
+   [Error CROSSSLOT] on the first mismatch. *)
+let validate_same_slot ~client ~slot queued =
+  let pinned_conn = Client.connection_for_slot client slot in
   let rec loop = function
     | [] -> Ok ()
     | q :: rest ->
@@ -142,14 +149,21 @@ let validate_same_slot ~slot queued =
              if Array.length q.args > key_index then begin
                let k = q.args.(key_index) in
                let s = Slot.of_key k in
-               if s <> slot then
+               let k_conn = Client.connection_for_slot client s in
+               let same_conn =
+                 match pinned_conn, k_conn with
+                 | Some a, Some b -> a == b
+                 | _ -> s = slot
+               in
+               if not same_conn then
                  Error
                    (Connection.Error.Server_error
                       { code = "CROSSSLOT";
                         message =
                           Printf.sprintf
-                            "atomic batch: key %S hashes to slot %d but \
-                             the batch is pinned to slot %d"
+                            "atomic batch: key %S hashes to slot %d \
+                             which maps to a different primary than \
+                             the batch's pinned slot %d"
                             k s slot })
                else loop rest
              end
@@ -209,7 +223,7 @@ let run_atomic ?timeout:_ client t =
     match atomic_slot t with
     | Error e -> Error e
     | Ok slot ->
-        (match validate_same_slot ~slot queued with
+        (match validate_same_slot ~client ~slot queued with
          | Error e -> Error e
          | Ok () ->
              (match Client.connection_for_slot client slot with
@@ -254,6 +268,7 @@ let run ?timeout client t =
 (* ---------- WATCH guards ---------- *)
 
 type guard = {
+  client : Client.t;
   conn : Connection.t;
   pinned_slot : int;
   atomic_lock : Eio.Mutex.t;
@@ -312,7 +327,7 @@ let watch ?hint_key client keys =
            let mutex = Client.atomic_lock_for_slot client slot in
            Eio.Mutex.lock mutex;
            let g = {
-             conn; pinned_slot = slot;
+             client; conn; pinned_slot = slot;
              atomic_lock = mutex; released = false;
            } in
            let args = Array.of_list ("WATCH" :: keys) in
@@ -369,7 +384,7 @@ let run_with_guard ?timeout:_ t g =
     match slot_check with
     | Error e -> release_guard g; Error e
     | Ok slot ->
-        match validate_same_slot ~slot queued with
+        match validate_same_slot ~client:g.client ~slot queued with
         | Error e -> release_guard g; Error e
         | Ok () ->
             let conn = g.conn in
