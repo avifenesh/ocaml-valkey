@@ -3,7 +3,6 @@
 A modern Valkey client for OCaml 5 + Eio, RESP3-native, no legacy baggage.
 
 Owner: Avi (Valkey org member, main maintainer of Valkey GLIDE).
-Status: Day 1 — learning OCaml, deciding connection-management model.
 
 ## Why this exists
 
@@ -36,12 +35,6 @@ Every new OCaml, Eio, or ecosystem concept is explained before it's used. Pace i
 - Sentinel
 - Blocking-connection APIs
 - Legacy `EVAL` ergonomics (lead with Functions)
-
-## Open architectural questions
-
-- Connection model: single connection vs pool vs cluster-aware router (pending Eio study).
-- Picos substrate vs Eio direct.
-- Typed command/reply via GADTs.
 
 ## Conventions
 

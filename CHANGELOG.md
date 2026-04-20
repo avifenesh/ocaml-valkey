@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-04-20
+
+First public release. The repo's been incubating for a few weeks
+across Phases 0–5; this tag freezes a working surface and ships it
+to opam under the `0.x` umbrella (API may evolve through `0.x`;
+`1.0` waits for the deeper audit in ROADMAP Phase 12).
+
+Highlights of what's in 0.1.0 (full per-phase detail below):
+
+- Connection layer: auto-reconnect, byte-budget backpressure,
+  circuit breaker, keepalive, TLS, optional cross-domain split.
+- RESP3 parser + writer; all 14 wire types.
+- ~140 typed commands across strings / counters / TTL / hashes
+  (incl. field TTL on Valkey 9+) / sets / lists / sorted sets /
+  streams (incl. consumer groups + XAUTOCLAIM) / scripting /
+  Functions / pub/sub / blocking / bitmap / HLL / geo / generic
+  keyspace / CLIENT admin / CLUSTER introspection / LATENCY /
+  MEMORY.
+- Cluster router: quorum-based topology discovery, periodic
+  refresh, MOVED/ASK/CLUSTERDOWN/TRYAGAIN/Interrupted retry,
+  Read_from with 3-tier AZ-affinity fallback, fan-out helpers.
+- Standalone uses the same router behind a synthetic single-shard
+  topology.
+- Transaction (MULTI/EXEC/WATCH with hint_key slot pinning).
+- Pub/sub: standalone with auto-resubscribe; cluster-aware with
+  failover-watchdog re-pinning.
+- 9 runnable examples under `examples/`.
+- 9 hand-written guides under `docs/` + odoc HTML.
+- 5 GitHub Actions workflows: ci, coverage (60% floor), bench
+  (10% regression gate), nightly fuzz, docs (gh-pages).
+- 221 tests; 10M strict parser-fuzz iterations; bin/soak/ for
+  long-running stability with GC + fd slope detection.
+
 ### Added — typed sorted-set wrappers
 
 The leaderboard example surfaced this gap; the wrappers below
