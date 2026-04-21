@@ -2,10 +2,12 @@
 
 A modern Valkey client for OCaml 5 + [Eio](https://github.com/ocaml-multicore/eio).
 
-**Status: alpha.** v0.1.0 tagged and pending opam-repository
-merge ([PR #29748](https://github.com/ocaml/opam-repository/pull/29748));
-0.2 in progress on `main`. Full core + cluster + batch + fuzz + CI
-+ docs. Phases 0-5 and 7 closed; Phase 6 waiting on the opam review.
+**Status: alpha.** v0.2.0 released (0.1.0 superseded — `@runtest`
+tried to hit a server that doesn't exist in the opam sandbox, so
+0.1.0 never made it through opam CI). Full core + cluster + batch
+(incl. WATCH guards + cross-slot `pfcount_cluster`) + fuzz + CI
++ docs. Phases 0–5 and 7 closed; Phase 6 shipping v0.2.0 to
+opam-repository; Phase 8 (client-side caching) next.
 
 ## Why
 
@@ -137,7 +139,13 @@ No Lwt compat layer. No legacy Redis support.
   `One (Error Timeout)`.
 - **Typed cluster helpers**: `Batch.mget_cluster`,
   `mset_cluster`, `del_cluster`, `unlink_cluster`,
-  `exists_cluster`, `touch_cluster`.
+  `exists_cluster`, `touch_cluster`, `pfcount_cluster` (HLL union
+  across slots via `DUMP` / `RESTORE` / `PFMERGE`).
+- **WATCH guards** for read-modify-write CAS —
+  `Batch.with_watch client ["k"] (fun guard -> …)` holds `WATCH`
+  across the closure (and the watched primary's atomic mutex),
+  commits via `Batch.run_with_guard`, guarantees `UNWATCH` on any
+  exit. Matches the classic "read, decide, maybe commit" pattern.
 - **Concurrent atomic batches are safe** — `Router.atomic_lock_for_slot`
   serialises MULTI/EXEC blocks on the shared connection; ops on
   different primaries run in parallel.
@@ -147,15 +155,16 @@ See [docs/batch.md](docs/batch.md).
 ### Transactions
 
 - `Valkey.Transaction.begin_ / queue / exec / discard` +
-  `with_transaction` scope helper.
-- Eager model (server-queued): per-command errors surface at
-  `queue` time.
-- Pins the MULTI/EXEC block to `slot(hint_key)`'s primary; holds
-  the per-primary atomic mutex for the duration so concurrent
-  transactions on the same slot queue behind each other safely.
+  `with_transaction` scope helper — thin façade over atomic
+  `Batch` as of 0.2.0 (one primitive, one mental model).
+- Buffered model: bad-arity / unknown-command errors surface
+  inside `exec`'s reply array, not at `queue` time. Fan-out
+  commands are still rejected at `queue` with a `Terminal` error.
+- `~watch` opens a `Batch.guard`, so the watched primary's atomic
+  mutex is held for the whole read-modify-exec window.
 - `exec` returns `(Resp3.t list option, Error.t) result` —
-  `Ok None` on WATCH abort.
-- For buffered semantics, see `Batch ~atomic:true`.
+  `Ok None` on WATCH abort; a fresh retry loop is the expected
+  response.
 
 ### Pub/sub
 
@@ -182,8 +191,14 @@ and `Client.spublish` (slot-pinned).
 
 ### Testing, fuzzing, chaos
 
-- **~230 tests** — unit + integration against standalone and
-  cluster. `dune runtest` takes ~20 s.
+- **~240 tests** across two targets:
+  - `dune runtest` → 89 pure-unit tests (RESP3, retry state
+    machine, slot / topology / discovery / redirect parsers,
+    command-spec table). No server needed — this is what ships
+    through opam CI.
+  - `dune exec test/run_tests.exe` → the full integration suite
+    (everything that talks to a live Valkey / cluster). Takes
+    ~20 s end-to-end against `docker compose up -d`.
 - **Parser fuzzer** (`bin/fuzz_parser/`) — byte-level + tree
   mutation + length-field poisoning + shrinker. 10 M strict
   clean at ~145 k inputs/s.
@@ -395,9 +410,12 @@ docker compose up -d
 sudo bash scripts/cluster-hosts-setup.sh     # one-time: /etc/hosts entries
 docker compose -f docker-compose.cluster.yml up -d
 
-# Build and run everything
+# Build everything + pure-unit tests (no server needed)
 dune build
 dune runtest
+
+# Full integration suite (needs the docker services above)
+dune exec test/run_tests.exe
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer
@@ -455,8 +473,9 @@ state:
 - ✅ Phase 3 — CI / CD + coverage + bench + nightly fuzz + docs
 - ✅ Phase 4 — documentation (9 guides + CONTRIBUTING + CHANGELOG)
 - ✅ Phase 5 — initial 9 examples + standing rule "ship features with their example"
-- 🔄 Phase 6 — publishing (v0.1.0 tagged, [opam-repository PR #29748](https://github.com/ocaml/opam-repository/pull/29748) open)
-- ✅ Phase 7 — Batch primitive (atomic + scatter-gather) + cluster typed helpers
+- 🔄 Phase 6 — publishing (v0.2.0 submitted to opam-repository)
+- ✅ Phase 7 — Batch primitive (atomic + scatter-gather + WATCH
+  guards + cross-slot `pfcount_cluster`) + cluster typed helpers
 - ⏳ Phase 8 — client-side caching (`CLIENT TRACKING` + LRU)
 - ⏳ Phase 9 — connection pool + blocking pool
 - ⏳ Phase 10 — IAM + mTLS + secret-hygiene audit

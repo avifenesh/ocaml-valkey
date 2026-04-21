@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-21
+
+### Changed — opam packaging
+
+- Split test suite into pure-unit and integration targets.
+  Pure-unit tests (resp3, resp3 round-trip, retry state machine,
+  byte_reader, valkey_error, slot, topology, discovery, redirect,
+  command_spec) run under `dune build @runtest` and ship green
+  through opam CI. Integration suites (everything that talks to a
+  live Valkey or cluster) are a plain `executable` stanza now —
+  invoke with `dune exec test/run_tests.exe` locally. Fixes the
+  opam-repository CI failure on valkey.0.1.0 where @runtest tried
+  to contact a server that does not exist in the opam sandbox.
+
 ### Added — Batch.pfcount_cluster
 
 - `Valkey.Batch.pfcount_cluster` — HLL union cardinality across
@@ -120,12 +134,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — same failure-mode class as the pre-existing leak of
   server-side MULTI state, so no user-visible regression for
   correctly-written callers.
-
-### Known limitations
-
-- `pfcount_cluster` is intentionally not provided — summing
-  per-slot `PFCOUNT` values over-counts union cardinality when
-  the same element appears in HLLs spread across slots.
 
 ## [0.1.0] — 2026-04-20
 

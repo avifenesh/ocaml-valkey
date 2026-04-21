@@ -1,3 +1,49 @@
+; Pure-unit tests — no Valkey server needed. Runs under
+; [dune build @runtest] and opam CI. Keep this list in sync
+; with [unit_tests.ml].
 (test
+ (name unit_tests)
+ (modules unit_tests
+          test_resp3
+          test_resp3_roundtrip
+          test_retry_state
+          test_byte_reader
+          test_valkey_error
+          test_slot
+          test_topology
+          test_discovery
+          test_redirect
+          test_command_spec)
+ (libraries valkey alcotest))
+
+; Integration tests — need a live Valkey / cluster. Built as a
+; plain executable so [@runtest] does not invoke them in the opam
+; sandbox. Run locally with [dune exec test/run_tests.exe].
+(executable
  (name run_tests)
+ (modules run_tests
+          test_connection
+          test_client
+          test_sorted_set
+          test_transaction
+          test_pubsub
+          test_named_commands
+          test_bitmap
+          test_generic_hll
+          test_geo
+          test_client_admin
+          test_admin_family
+          test_cluster
+          test_command_spec_property
+          test_batch
+          test_resp3
+          test_resp3_roundtrip
+          test_retry_state
+          test_byte_reader
+          test_valkey_error
+          test_slot
+          test_topology
+          test_discovery
+          test_redirect
+          test_command_spec)
  (libraries valkey alcotest eio_main))
