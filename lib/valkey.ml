@@ -19,3 +19,4 @@ module Batch = Batch
 module Pubsub = Pubsub
 module Cluster_pubsub = Cluster_pubsub
 module Named_commands = Named_commands
+module Cache = Cache
