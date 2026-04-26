@@ -66,12 +66,18 @@ let query_seed ~sw ~net ~clock ?domain_mgr ?connection_config (host, port) =
 
 let discover_from_seeds ~sw ~net ~clock ?domain_mgr ?connection_config
     ?(agreement_ratio = 0.2) ?(min_nodes_for_quorum = 3) ~seeds () =
-  let views =
-    Eio.Fiber.List.map
-      (query_seed ~sw ~net ~clock ?domain_mgr ?connection_config)
-      seeds
-  in
-  let queried = List.length seeds in
-  match select ~agreement_ratio ~min_nodes_for_quorum ~queried ~views with
-  | Agreed t | Agreed_fallback t -> Ok t
-  | No_agreement -> Error "no topology agreement across seeds"
+  Observability.discover_span ~seed_count:(List.length seeds) (fun span ->
+    let views =
+      Eio.Fiber.List.map
+        (query_seed ~sw ~net ~clock ?domain_mgr ?connection_config)
+        seeds
+    in
+    let queried = List.length seeds in
+    match select ~agreement_ratio ~min_nodes_for_quorum ~queried ~views with
+    | Agreed t ->
+        Observability.record_discovery_outcome span `Agreed; Ok t
+    | Agreed_fallback t ->
+        Observability.record_discovery_outcome span `Agreed_fallback; Ok t
+    | No_agreement ->
+        Observability.record_discovery_outcome span `No_agreement;
+        Error "no topology agreement across seeds")

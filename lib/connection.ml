@@ -313,6 +313,8 @@ type t = {
   budget : Byte_sem.t;
   config : Config.t;
   pushes : Resp3.t Eio.Stream.t;
+  host : string;                            (* for telemetry only *)
+  port : int;                               (* for telemetry only *)
   connect_once : unit -> (socket, Error.t) result;
   sleep : float -> unit;
   now : unit -> float;
@@ -480,14 +482,19 @@ let make_tcp_connector ~sw ~net ~host ~port ~tls =
          with exn -> Error (Error.Tcp_refused (describe_exn exn)))
 
 let connect_and_handshake t : (socket * Resp3.t * string option, Error.t) result =
-  match t.connect_once () with
-  | Error e -> Error e
-  | Ok sock ->
-      (match full_handshake sock t.config.handshake with
-       | Ok (info, az) -> Ok (sock, info, az)
-       | Error e ->
-           sock.close ();
-           Error e)
+  Observability.connect_span
+    ~host:t.host ~port:t.port
+    ~tls:(t.config.tls <> None)
+    ~proto:t.config.handshake.protocol
+    (fun _span ->
+      match t.connect_once () with
+      | Error e -> Error e
+      | Ok sock ->
+          (match full_handshake sock t.config.handshake with
+           | Ok (info, az) -> Ok (sock, info, az)
+           | Error e ->
+               sock.close ();
+               Error e))
 
 let set_state t new_state =
   t.state <- new_state;
@@ -856,6 +863,8 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default)
     budget = Byte_sem.make config.max_queued_bytes;
     config;
     pushes = Eio.Stream.create config.push_buffer_size;
+    host;
+    port;
     connect_once;
     sleep;
     now;

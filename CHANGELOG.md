@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — OpenTelemetry tracing
+
+- Library now emits OpenTelemetry spans for connect / handshake,
+  cluster discover, and topology refresh. Span names: `valkey.connect`,
+  `valkey.cluster.discover`, `valkey.cluster.refresh`. With no exporter
+  configured the cost is near-zero. Per-command spans are intentionally
+  not emitted — see `docs/observability.md` for the rationale,
+  attribute schema, and the redaction invariants the library
+  enforces (no auth credentials, command keys, or values in spans).
+- New dependency: `opentelemetry >= 0.90`.
+
+### Security — narrowed wrap_with_tls catch + non-leaking error payloads
+
+- `Connection.wrap_with_tls` no longer catches arbitrary exceptions
+  as `Tls_failed`; only `Tls_eio.Tls_alert`, `Tls_eio.Tls_failure`,
+  `End_of_file`, and `Eio.Io _` map to that variant. Anything else
+  propagates so internal bugs surface instead of being mislabeled.
+- `Tcp_refused`/`Dns_failed`/`Tls_failed` payloads no longer carry
+  `Printexc.to_string` of the underlying exception (which prints
+  constructor args, paths, raw cert bytes). Replaced with a small
+  classifier producing stable short kinds (`peer_closed`, `tls_alert`,
+  `tls_failure`, `io_error`, errno text via `Unix.error_message`).
+  Programmatic handling stays on the `Error.t` variant.
+
 ## [0.2.0] — 2026-04-21
 
 ### Changed — opam packaging

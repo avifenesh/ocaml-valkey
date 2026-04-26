@@ -447,24 +447,31 @@ let refresh_from_seeds ~sw ~net ~clock ?domain_mgr ~cfg ~pool
   | Error _ -> ()
 
 let refresh_once ~sw ~net ~clock ?domain_mgr ~cfg ~pool ~topology_atomic () =
-  let views = query_pool_for_topology pool in
-  let queried = List.length views in
-  match
-    Discovery.select
-      ~agreement_ratio:cfg.Config.agreement_ratio
-      ~min_nodes_for_quorum:cfg.Config.min_nodes_for_quorum
-      ~queried ~views
-  with
-  | Agreed new_topo | Agreed_fallback new_topo ->
-      apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-        ~topology_atomic new_topo
-  | No_agreement ->
-      (* Pool is empty or every node is unreachable / disagrees. Fall
-         back to the seed list — that is how the cluster was bootstrapped,
-         and the only address set we can be sure is still meaningful to
-         the operator. *)
-      refresh_from_seeds ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-        ~topology_atomic ()
+  Observability.refresh_span (fun span ->
+    let views = query_pool_for_topology pool in
+    let queried = List.length views in
+    match
+      Discovery.select
+        ~agreement_ratio:cfg.Config.agreement_ratio
+        ~min_nodes_for_quorum:cfg.Config.min_nodes_for_quorum
+        ~queried ~views
+    with
+    | Agreed new_topo ->
+        Observability.record_discovery_outcome span `Agreed;
+        apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+          ~topology_atomic new_topo
+    | Agreed_fallback new_topo ->
+        Observability.record_discovery_outcome span `Agreed_fallback;
+        apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+          ~topology_atomic new_topo
+    | No_agreement ->
+        Observability.record_discovery_outcome span `No_agreement;
+        (* Pool is empty or every node is unreachable / disagrees. Fall
+           back to the seed list — that is how the cluster was bootstrapped,
+           and the only address set we can be sure is still meaningful to
+           the operator. *)
+        refresh_from_seeds ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+          ~topology_atomic ())
 
 let refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
     ~topology_atomic ~refresh_signal ~refresh_mutex ~closing () =

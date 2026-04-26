@@ -34,5 +34,6 @@
   (domain-name (>= 0.4.0))
   (mirage-crypto-rng (>= 2.0.0))
   (digestif (>= 1.2.0))
+  (opentelemetry (>= 0.90))
   (alcotest (and :with-test (>= 1.7.0)))
   (bisect_ppx (and :with-dev-setup (>= 2.8.0)))))
