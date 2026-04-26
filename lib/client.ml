@@ -181,47 +181,75 @@ let string_option_of_reply cmd = function
 
 (* ---------- strings / keys ---------- *)
 
-(* --- Cache-backed GET -------------------------------------------
+(* --- Cache-backed read helper ----------------------------------
 
-   Three coordination concerns:
+   Three coordination concerns apply to every cacheable read:
 
    1. Hit: short-circuit routing; no wire.
-   2. Single-flight on miss: N concurrent GETs for the same cold
+   2. Single-flight on miss: N concurrent reads for the same cold
       key issue ONE wire fetch; N-1 join the first's promise.
    3. Invalidation race: if an invalidation arrives for this key
       while a fetch is in flight, the fetched value is already
       stale and must not be cached. Detected via [Inflight].
 
    Atomic batches, pubsub and raw Connection.request paths all
-   bypass this; they don't call [Client.get]. *)
+   bypass this; they don't call the cached read helpers.
 
-(* Perform the wire fetch, resolve the inflight promise, decide
-   whether to cache the result based on Inflight's dirty flag. *)
-let cached_fetch_owner t ccfg key resolver ?timeout ?read_from () =
-  let result = exec ?timeout ?read_from t [| "GET"; key |] in
-  (* Remove the in-flight entry before doing any cache write: if
-     an invalidation arrives between our cache write and our table
-     remove, it would flip a dirty flag on the entry *we just took
-     care of*, and the next fetch would start with a stale flag.
-     [complete] atomically removes + reports the dirty flag. *)
-  let completion =
-    match result with
-    | Ok _ -> Inflight.complete ccfg.Client_cache.inflight key
-    | Error _ ->
-        Inflight.abandon ccfg.Client_cache.inflight key;
-        Inflight.Clean (* unused; error propagates below *)
+   One logical key → at most one cache entry. Different Valkey
+   types (string, hash, set) cannot coexist on the same key
+   without WRONGTYPE, so a cached-shape-mismatch at lookup time
+   is treated as a miss and re-fetches. Server invalidations on
+   the key evict the single cache entry regardless of its shape. *)
+
+(* Cached-read frame. [cmd] is the wire command; [accepts] decides
+   whether a cached [Resp3.t] under this key matches this command's
+   reply shape ([Some decoded] if yes, [None] to re-fetch); [cache_ok]
+   decides whether a fresh reply should be stored; [decode] converts
+   a (possibly fresh) reply to the typed caller return.
+
+   Null replies aren't cached by convention: no server invalidation
+   follows an external SET of a previously-missing key, so a negative
+   entry could stay stale forever. *)
+let cached_read t ccfg key ?timeout ?read_from
+    ~cmd ~(accepts : Resp3.t -> 'a option)
+    ~(cache_ok : Resp3.t -> bool)
+    ~(decode : Resp3.t -> ('a, Connection_error.t) result) () =
+  let miss () =
+    match Inflight.begin_fetch ccfg.Client_cache.inflight key with
+    | Inflight.Fresh resolver ->
+        let result = exec ?timeout ?read_from t cmd in
+        let completion =
+          match result with
+          | Ok _ -> Inflight.complete ccfg.inflight key
+          | Error _ ->
+              Inflight.abandon ccfg.inflight key;
+              Inflight.Clean   (* unused *)
+        in
+        (match result with
+         | Ok v when completion = Inflight.Clean && cache_ok v ->
+             Cache.put ccfg.cache key v
+         | _ -> ());
+        (match result with
+         | Ok v -> Eio.Promise.resolve resolver (Ok v)
+         | Error e -> Eio.Promise.resolve resolver (Error e));
+        (match result with
+         | Error e -> Error e
+         | Ok v -> decode v)
+    | Inflight.Joining promise ->
+        (match Eio.Promise.await promise with
+         | Error e -> Error e
+         | Ok v -> decode v)
   in
-  (match result with
-   | Ok (Resp3.Bulk_string _ as v)
-     when completion = Inflight.Clean ->
-       Cache.put ccfg.cache key v
-   | _ -> ());
-  (* Resolve after cache-write decision so joined fibers see the
-     fully-settled cache state on wake. *)
-  (match result with
-   | Ok v -> Eio.Promise.resolve resolver (Ok v)
-   | Error e -> Eio.Promise.resolve resolver (Error e));
-  result
+  match Cache.get ccfg.Client_cache.cache key with
+  | Some v ->
+      (match accepts v with
+       | Some decoded -> Ok decoded
+       | None ->
+           (* Wrong-shape entry cached (unlikely given server's
+              WRONGTYPE rule, but don't assume). Treat as miss and
+              re-fetch; single-flight will dedup. *)
+           miss ())
+  | None -> miss ()
 
 let get ?timeout ?read_from t key =
   match t.client_cache with
@@ -230,38 +258,17 @@ let get ?timeout ?read_from t key =
        | Error e -> Error e
        | Ok v -> string_option_of_reply "GET" v)
   | Some ccfg ->
-      (match Cache.get ccfg.Client_cache.cache key with
-       | Some (Resp3.Bulk_string s) -> Ok (Some s)
-       | Some Resp3.Null -> Ok None
-       | Some _ ->
-           (* Non-GET-shaped entry in cache — should not happen but
-              don't corrupt the caller; fall through as a miss and
-              let the owner/join path refresh it. *)
-           (match Inflight.begin_fetch ccfg.inflight key with
-            | Inflight.Fresh resolver ->
-                (match
-                   cached_fetch_owner t ccfg key resolver
-                     ?timeout ?read_from ()
-                 with
-                 | Error e -> Error e
-                 | Ok v -> string_option_of_reply "GET" v)
-            | Inflight.Joining promise ->
-                (match Eio.Promise.await promise with
-                 | Error e -> Error e
-                 | Ok v -> string_option_of_reply "GET" v))
-       | None ->
-           (match Inflight.begin_fetch ccfg.inflight key with
-            | Inflight.Fresh resolver ->
-                (match
-                   cached_fetch_owner t ccfg key resolver
-                     ?timeout ?read_from ()
-                 with
-                 | Error e -> Error e
-                 | Ok v -> string_option_of_reply "GET" v)
-            | Inflight.Joining promise ->
-                (match Eio.Promise.await promise with
-                 | Error e -> Error e
-                 | Ok v -> string_option_of_reply "GET" v)))
+      cached_read t ccfg key ?timeout ?read_from
+        ~cmd:[| "GET"; key |]
+        ~accepts:(function
+          | Resp3.Bulk_string s -> Some (Some s)
+          | Resp3.Null -> Some None
+          | _ -> None)
+        ~cache_ok:(function
+          | Resp3.Bulk_string _ -> true
+          | _ -> false)
+        ~decode:(string_option_of_reply "GET")
+        ()
 
 let set ?timeout ?cond ?ttl ?ifeq t key value =
   let args = build_set_args ?cond ?ttl ?ifeq ~get:false key value in
@@ -433,10 +440,8 @@ let extract_string cmd = function
   | Resp3.Simple_string s -> Ok s
   | v -> Error (protocol_violation cmd v)
 
-let hgetall ?timeout ?read_from t key =
-  match exec ?timeout ?read_from t [| "HGETALL"; key |] with
-  | Error e -> Error e
-  | Ok (Resp3.Map kvs) ->
+let decode_hgetall_reply = function
+  | Resp3.Map kvs ->
       let rec convert acc = function
         | [] -> Ok (List.rev acc)
         | (k, v) :: rest ->
@@ -448,7 +453,7 @@ let hgetall ?timeout ?read_from t key =
                   | Ok v' -> convert ((k', v') :: acc) rest))
       in
       convert [] kvs
-  | Ok (Resp3.Array items) ->
+  | Resp3.Array items ->
       (* Defensive: some proxies translate RESP3 Map into flat Array. *)
       let rec convert acc = function
         | [] -> Ok (List.rev acc)
@@ -462,7 +467,32 @@ let hgetall ?timeout ?read_from t key =
                   | Ok v' -> convert ((k', v') :: acc) rest))
       in
       convert [] items
-  | Ok v -> Error (protocol_violation "HGETALL" v)
+  | v -> Error (protocol_violation "HGETALL" v)
+
+(* HGETALL on a missing hash returns an empty Map. We cache even
+   the empty reply so repeated "does the hash exist" queries hit
+   the cache; server invalidation will evict if someone HSETs. *)
+let hgetall ?timeout ?read_from t key =
+  match t.client_cache with
+  | None ->
+      (match exec ?timeout ?read_from t [| "HGETALL"; key |] with
+       | Error e -> Error e
+       | Ok v -> decode_hgetall_reply v)
+  | Some ccfg ->
+      cached_read t ccfg key ?timeout ?read_from
+        ~cmd:[| "HGETALL"; key |]
+        ~accepts:(fun v ->
+          match v with
+          | Resp3.Map _ | Resp3.Array _ ->
+              (match decode_hgetall_reply v with
+               | Ok decoded -> Some decoded
+               | Error _ -> None)
+          | _ -> None)
+        ~cache_ok:(function
+          | Resp3.Map _ | Resp3.Array _ -> true
+          | _ -> false)
+        ~decode:decode_hgetall_reply
+        ()
 
 let hincrby ?timeout t key field delta =
   int64_of_reply "HINCRBY"
@@ -653,12 +683,32 @@ let strings_of_resp3_collection cmd items =
   in
   loop [] items
 
+let decode_smembers_reply = function
+  | Resp3.Set xs | Resp3.Array xs ->
+      strings_of_resp3_collection "SMEMBERS" xs
+  | v -> Error (protocol_violation "SMEMBERS" v)
+
 let smembers ?timeout ?read_from t key =
-  match exec ?timeout ?read_from t [| "SMEMBERS"; key |] with
-  | Error e -> Error e
-  | Ok (Resp3.Set xs) -> strings_of_resp3_collection "SMEMBERS" xs
-  | Ok (Resp3.Array xs) -> strings_of_resp3_collection "SMEMBERS" xs
-  | Ok v -> Error (protocol_violation "SMEMBERS" v)
+  match t.client_cache with
+  | None ->
+      (match exec ?timeout ?read_from t [| "SMEMBERS"; key |] with
+       | Error e -> Error e
+       | Ok v -> decode_smembers_reply v)
+  | Some ccfg ->
+      cached_read t ccfg key ?timeout ?read_from
+        ~cmd:[| "SMEMBERS"; key |]
+        ~accepts:(fun v ->
+          match v with
+          | Resp3.Set _ | Resp3.Array _ ->
+              (match decode_smembers_reply v with
+               | Ok decoded -> Some decoded
+               | Error _ -> None)
+          | _ -> None)
+        ~cache_ok:(function
+          | Resp3.Set _ | Resp3.Array _ -> true
+          | _ -> false)
+        ~decode:decode_smembers_reply
+        ()
 
 let sismember ?timeout ?read_from t key member =
   bool_from_integer "SISMEMBER"

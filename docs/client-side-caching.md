@@ -162,10 +162,38 @@ unchanged.
 Also added `Client_cache.make ~cache ()` convenience constructor;
 the record form still works but `make` initialises `inflight`.
 
-### … 6. Per-command coverage
+### ✅ 6a. HGETALL + SMEMBERS cache coverage
 
-`MGET`, `HGET`, `HMGET`, `HGETALL`, `EXISTS`, `STRLEN`, `TYPE`
-go through the cache path. Today only `Client.get` does.
+`Client.hgetall` and `Client.smembers` now go through the same
+cache path as `Client.get`. One logical Valkey key → at most
+one cache entry, regardless of which command read it; Valkey's
+WRONGTYPE rule keeps this from producing wrong-shape cached
+entries in practice, and the read-path treats a wrong-shape
+entry as a miss and re-fetches (single-flight dedups).
+
+Refactor: the `cached_read` helper in `lib/client.ml` is now
+generic over four parameters (`cmd`, `accepts`, `cache_ok`,
+`decode`) so adding the next cacheable command is a few lines.
+
+Deliberately **not** cached in this library:
+
+- `HGET` / `HMGET`: would require a compound `(key, field)`
+  cache key and a prefix-evict on invalidation. redis-py
+  shipped this and hit a field-collision bug (issue #3612).
+  Not worth the complexity until proven needed.
+- `EXISTS`: returns a count across multiple keys. Caching
+  requires a per-key boolean store separate from the reply
+  cache. Low value.
+- `STRLEN` / `TYPE`: cacheable in principle but every
+  invalidation for the key also evicts the `GET`-shaped
+  cache entry these would ride on. Users who ask for these
+  pay one round-trip; not worth a specialised path.
+
+### … 6b. MGET cache coverage
+
+MGET can be split into per-key cache lookups + a batched fetch
+of misses, with per-key single-flight reuse. Own step because
+partial-hit logic is non-trivial.
 
 ### … 7. Cluster integration
 
