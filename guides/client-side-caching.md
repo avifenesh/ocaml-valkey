@@ -257,14 +257,65 @@ Integration tests (`test/test_csc_cluster.ml`, needs
   cache (one null-body invalidation per shard, all evicting
   the same shared cache).
 
-### … 8. Failure-mode tests
+### ✅ 8. Lifecycle failure-mode tests
 
-Failover mid-cache, slot migration mid-cache, OOM under load.
+Prove the flush invariants hold end-to-end against a real
+server / cluster:
 
-### … 9. Per-key TTL safety net
+- **Standalone reconnect**: populate cache, `CLIENT KILL` self,
+  assert `Cache.count = 0` after reconnect, then assert a fresh
+  read re-populates (tracking is back). Validates B7.2.
+- **Cluster failover**: populate cache with keys on two shards,
+  pick a replica from `CLUSTER NODES`, force promotion with
+  `CLUSTER FAILOVER FORCE`, assert cache cleared within a few
+  seconds. Validates B7.1 (topology-refresh flush) + B7.2
+  (per-connection reconnect flush) together — whichever path
+  fires first does the clear.
 
-Optional defense-in-depth; also plugs the Flush_all/in-flight
-race gap.
+Tests live in `test/test_csc_lifecycle.ml`, both marked `Slow`
+(multi-second by design). Cluster test skips gracefully when
+the compose cluster isn't reachable.
+
+Slot-migration-under-load and OOM are not covered here; the
+former needs orchestrating a live `CLUSTER SETSLOT` loop with
+concurrent cached reads, the latter needs a stress harness.
+Deferred until there's an incident report asking for them.
+
+### ✅ 9. Per-key TTL safety net + Flush_all in-flight-race fix
+
+Two small but correctness-material additions:
+
+1. **Lazy TTL on `Cache` entries.** `Cache.put ?ttl_ms` sets a
+   wall-clock deadline per entry (same epoch as
+   `Unix.gettimeofday`). `Cache.get` checks the deadline on
+   every hit; expired entries are evicted in place and
+   reported as a miss. No background sweeper. `Client_cache.t`
+   already carried `entry_ttl_ms`; `Client.get` / `hgetall` /
+   `smembers` / `mget` all forward it to `Cache.put`.
+2. **`Inflight.mark_all_dirty`.** `Invalidation.apply` now
+   marks every pending fetch dirty before clearing the cache
+   on `Flush_all`, closing the in-flight-race gap documented
+   in B3. An owner whose fetch was mid-flight at the moment
+   of a server `FLUSHDB`/`FLUSHALL` will now see `Dirty` on
+   completion and skip the cache write, instead of re-populating
+   with a pre-flush stale value.
+
+TTL is off by default (`entry_ttl_ms = None`). Users who want
+defense-in-depth against missed invalidations set e.g.
+`Client_cache.make ~cache ~entry_ttl_ms:60_000 ()` for a 60s
+cap. Cost: one extra float comparison per hit.
+
+Tests:
+- 3 unit tests on `Cache`: no-TTL entries don't expire; TTL
+  entries miss after deadline; `put` refreshes the deadline.
+- 2 unit tests on `Inflight.mark_all_dirty`: flips every
+  pending entry; no-op on empty table.
+- 1 unit test on `Invalidation.apply Flush_all`: marks every
+  pending fetch dirty.
+- 1 integration test: TTL expires a cached entry with no
+  server-side activity.
+
+All 136 unit + 22 integration tests green.
 
 ### … 10. Metrics + BCAST mode
 
