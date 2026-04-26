@@ -79,6 +79,11 @@ let from_router ~config router =
 
 let close t = Router.close t.router
 
+let cache_metrics t =
+  match t.client_cache with
+  | None -> None
+  | Some ccfg -> Some (Cache.metrics ccfg.Client_cache.cache)
+
 let raw_connection t =
   match Router.primary_connection t.router with
   | Some c -> c

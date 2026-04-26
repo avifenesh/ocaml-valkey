@@ -165,6 +165,58 @@ let test_ttl_put_refreshes_deadline () =
   | Some (Valkey.Resp3.Bulk_string "v2") -> ()
   | _ -> Alcotest.fail "expected v2"
 
+(* --- metrics ------------------------------------------------ *)
+
+let test_metrics_hits_and_misses () =
+  let c = C.create ~byte_budget:1024 in
+  let _ = C.get c "cold" in   (* miss *)
+  C.put c "k" (bs "v");
+  let _ = C.get c "k" in      (* hit *)
+  let _ = C.get c "k" in      (* hit *)
+  let _ = C.get c "still-cold" in  (* miss *)
+  let m = C.metrics c in
+  Alcotest.(check int) "hits" 2 m.hits;
+  Alcotest.(check int) "misses" 2 m.misses;
+  Alcotest.(check int) "puts" 1 m.puts
+
+let test_metrics_ttl_eviction_counted () =
+  let c = C.create ~byte_budget:1024 in
+  C.put ~ttl_ms:10 c "k" (bs "v");
+  sleep_ms 30.0;
+  let _ = C.get c "k" in   (* TTL-evict + miss *)
+  let m = C.metrics c in
+  Alcotest.(check int) "TTL eviction" 1 m.evicts_ttl;
+  Alcotest.(check int) "miss counts too" 1 m.misses
+
+let test_metrics_budget_eviction_counted () =
+  let v = bs (String.make 100 'x') in
+  let v_size = C.size_of v in
+  let c = C.create ~byte_budget:(2 * v_size) in
+  C.put c "a" v;
+  C.put c "b" v;
+  C.put c "c" v;   (* evicts a *)
+  let m = C.metrics c in
+  Alcotest.(check int) "budget eviction" 1 m.evicts_budget
+
+let test_metrics_invalidation_counted () =
+  let c = C.create ~byte_budget:1024 in
+  C.put c "k" (bs "v");
+  C.evict c "k";
+  C.evict c "absent";  (* no-op, shouldn't count *)
+  let m = C.metrics c in
+  Alcotest.(check int) "only real invalidations counted" 1 m.invalidations
+
+let test_metrics_reset () =
+  let c = C.create ~byte_budget:1024 in
+  C.put c "k" (bs "v");
+  let _ = C.get c "k" in
+  let _ = C.get c "cold" in
+  C.reset_metrics c;
+  let m = C.metrics c in
+  Alcotest.(check int) "hits zero after reset" 0 m.hits;
+  Alcotest.(check int) "misses zero after reset" 0 m.misses;
+  Alcotest.(check int) "puts zero after reset" 0 m.puts
+
 let tests =
   [ Alcotest.test_case "empty cache" `Quick test_create_empty;
     Alcotest.test_case "negative byte_budget rejected" `Quick
@@ -192,4 +244,13 @@ let tests =
       test_ttl_expired_entry_is_miss;
     Alcotest.test_case "put refreshes ttl deadline" `Slow
       test_ttl_put_refreshes_deadline;
+    Alcotest.test_case "metrics hits and misses" `Quick
+      test_metrics_hits_and_misses;
+    Alcotest.test_case "metrics ttl eviction counted" `Slow
+      test_metrics_ttl_eviction_counted;
+    Alcotest.test_case "metrics budget eviction counted" `Quick
+      test_metrics_budget_eviction_counted;
+    Alcotest.test_case "metrics invalidation counted" `Quick
+      test_metrics_invalidation_counted;
+    Alcotest.test_case "metrics reset" `Quick test_metrics_reset;
   ]

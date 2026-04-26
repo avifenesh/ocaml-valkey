@@ -45,6 +45,10 @@ val from_router : config:Config.t -> Router.t -> t
 
 val close : t -> unit
 
+val cache_metrics : t -> Cache.metrics option
+(** Returns a snapshot of the client-side cache counters, or
+    [None] if caching is not enabled on this client. *)
+
 val raw_connection : t -> Connection.t
 
 val connection_for_slot : t -> int -> Connection.t option

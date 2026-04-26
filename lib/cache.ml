@@ -26,12 +26,29 @@ type entry = {
       by [put] when the caller supplies [?ttl_ms]. *)
 }
 
+(* Metrics counters. Atomics so [metrics] can read them without
+   taking [t.mutex]. Monotonic; reset only by [reset_metrics]. *)
+type metrics = {
+  hits : int;
+  misses : int;
+  evicts_budget : int;
+  evicts_ttl : int;
+  invalidations : int;
+  puts : int;
+}
+
 type t = {
   byte_budget : int;
   table : (string, entry) Hashtbl.t;
   mutable head : entry option;
   mutable tail : entry option;
   mutable total_bytes : int;
+  hits : int Atomic.t;
+  misses : int Atomic.t;
+  evicts_budget : int Atomic.t;
+  evicts_ttl : int Atomic.t;
+  invalidations : int Atomic.t;
+  puts : int Atomic.t;
   mutex : Mutex.t;
 }
 
@@ -102,6 +119,7 @@ let rec evict_until_fits t =
     if popped = 0 then ()  (* list empty; budget unsatisfiable *)
     else begin
       t.total_bytes <- t.total_bytes - popped;
+      Atomic.incr t.evicts_budget;
       evict_until_fits t
     end
 
@@ -119,12 +137,20 @@ let create ~byte_budget =
     head = None;
     tail = None;
     total_bytes = 0;
+    hits = Atomic.make 0;
+    misses = Atomic.make 0;
+    evicts_budget = Atomic.make 0;
+    evicts_ttl = Atomic.make 0;
+    invalidations = Atomic.make 0;
+    puts = Atomic.make 0;
     mutex = Mutex.create () }
 
 let get t key =
   with_lock t (fun () ->
       match Hashtbl.find_opt t.table key with
-      | None -> None
+      | None ->
+          Atomic.incr t.misses;
+          None
       | Some e ->
           (* Lazy TTL expiration: if the entry's deadline has
              passed, treat as a miss and evict in place. No
@@ -139,9 +165,12 @@ let get t key =
             unlink t e;
             Hashtbl.remove t.table key;
             t.total_bytes <- t.total_bytes - e.size;
+            Atomic.incr t.evicts_ttl;
+            Atomic.incr t.misses;
             None
           end else begin
             move_to_front t e;
+            Atomic.incr t.hits;
             Some e.value
           end)
 
@@ -151,9 +180,11 @@ let put ?ttl_ms t key value =
       if new_size > t.byte_budget then
         (* Single value exceeds the whole budget — reject. Any prior
            entry for this key is left untouched (the docstring spells
-           this out). *)
-        ()
+           this out). [puts] still increments: the caller called put
+           even if we refused to store. *)
+        Atomic.incr t.puts
       else begin
+        Atomic.incr t.puts;
         let expires_at =
           match ttl_ms with
           | None -> None
@@ -189,7 +220,8 @@ let evict t key =
       | Some e ->
           unlink t e;
           Hashtbl.remove t.table key;
-          t.total_bytes <- t.total_bytes - e.size)
+          t.total_bytes <- t.total_bytes - e.size;
+          Atomic.incr t.invalidations)
 
 let clear t =
   with_lock t (fun () ->
@@ -200,6 +232,23 @@ let clear t =
 
 let size t =
   with_lock t (fun () -> t.total_bytes)
+
+let metrics t = {
+  hits = Atomic.get t.hits;
+  misses = Atomic.get t.misses;
+  evicts_budget = Atomic.get t.evicts_budget;
+  evicts_ttl = Atomic.get t.evicts_ttl;
+  invalidations = Atomic.get t.invalidations;
+  puts = Atomic.get t.puts;
+}
+
+let reset_metrics t =
+  Atomic.set t.hits 0;
+  Atomic.set t.misses 0;
+  Atomic.set t.evicts_budget 0;
+  Atomic.set t.evicts_ttl 0;
+  Atomic.set t.invalidations 0;
+  Atomic.set t.puts 0
 
 let count t =
   with_lock t (fun () ->

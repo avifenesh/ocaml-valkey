@@ -176,6 +176,40 @@ let test_single_flight_burst () =
           Alcotest.fail "every fiber should see Ok (Some v)")
     results
 
+(* --- metrics surface --------------------------------------- *)
+
+(* Client.cache_metrics returns None when no cache is configured
+   and Some m when it is. A mix of hits and misses + invalidations
+   is reflected in the counters. We take a baseline and measure
+   deltas; can't reset through the Client API (cache module has
+   reset_metrics but we don't expose a Client.reset_cache_metrics
+   — intentionally, since you usually want monotonic counters in
+   production). *)
+let test_cache_metrics_tracks_activity () =
+  let k1 = "ocaml:csc:metrics:k1" in
+  let k2 = "ocaml:csc:metrics:k2" in
+  with_csc ~keys:[k1; k2] @@ fun env client _cache aux ->
+  let _ = C.exec aux [| "SET"; k1; "v1" |] in
+  let _ = C.exec aux [| "SET"; k2; "v2" |] in
+  let baseline =
+    match C.cache_metrics client with
+    | Some m -> m
+    | None -> Alcotest.fail "cache_metrics None with cache configured"
+  in
+  let _ = C.get client k1 in   (* miss, put *)
+  let _ = C.get client k1 in   (* hit *)
+  let _ = C.get client k2 in   (* miss, put *)
+  let _ = C.get client k2 in   (* hit *)
+  let _ = C.exec aux [| "SET"; k1; "v1b" |] in
+  Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
+  let m = Option.get (C.cache_metrics client) in
+  Alcotest.(check int) "hits delta" 2 (m.hits - baseline.hits);
+  Alcotest.(check int) "misses delta" 2 (m.misses - baseline.misses);
+  Alcotest.(check bool) "invalidations increased" true
+    (m.invalidations > baseline.invalidations);
+  Alcotest.(check bool) "puts increased" true
+    (m.puts > baseline.puts)
+
 let tests =
   [ Alcotest.test_case "miss then hit (populate + cache-hit)" `Quick
       test_populates_then_hits;
@@ -189,4 +223,6 @@ let tests =
       `Quick test_single_flight_concurrent_cold_gets;
     Alcotest.test_case "single-flight: 10 concurrent cold GETs → 1 wire"
       `Quick test_single_flight_burst;
+    Alcotest.test_case "cache_metrics tracks client activity" `Quick
+      test_cache_metrics_tracks_activity;
   ]

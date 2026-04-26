@@ -65,3 +65,23 @@ val count : t -> int
     behaviour. Approximate — see [docs/client-side-caching.md] for
     the exact formula. *)
 val size_of : Resp3.t -> int
+
+(** Monotonic counters for cache activity. [puts] increments on
+    every [put] call (including ones rejected because the value
+    exceeded the byte budget — the caller still asked). *)
+type metrics = {
+  hits : int;
+  misses : int;
+  evicts_budget : int;       (** Evictions triggered by byte-budget pressure. *)
+  evicts_ttl : int;          (** Evictions triggered by lazy TTL expiry. *)
+  invalidations : int;       (** Entries removed via [evict] or invalidator fiber. *)
+  puts : int;                (** Total [put] calls (including rejected-oversize). *)
+}
+
+(** [metrics t] returns a snapshot of the counters. Non-locking
+    — atomic reads only. *)
+val metrics : t -> metrics
+
+(** [reset_metrics t] zeros every counter. Useful for benchmarks
+    or test harnesses that want a clean window. *)
+val reset_metrics : t -> unit
