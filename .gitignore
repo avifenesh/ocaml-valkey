@@ -51,5 +51,8 @@ coverage/
 .claude/
 .fastembed_cache/
 
+# External source dumps pulled for reference; regenerable, not ours.
+agent-knowledge/glide-csc-src/
+
 # Generated TLS dev certs
 tls/
