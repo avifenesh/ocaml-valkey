@@ -181,44 +181,87 @@ let string_option_of_reply cmd = function
 
 (* ---------- strings / keys ---------- *)
 
+(* --- Cache-backed GET -------------------------------------------
+
+   Three coordination concerns:
+
+   1. Hit: short-circuit routing; no wire.
+   2. Single-flight on miss: N concurrent GETs for the same cold
+      key issue ONE wire fetch; N-1 join the first's promise.
+   3. Invalidation race: if an invalidation arrives for this key
+      while a fetch is in flight, the fetched value is already
+      stale and must not be cached. Detected via [Inflight].
+
+   Atomic batches, pubsub and raw Connection.request paths all
+   bypass this; they don't call [Client.get]. *)
+
+(* Perform the wire fetch, resolve the inflight promise, decide
+   whether to cache the result based on Inflight's dirty flag. *)
+let cached_fetch_owner t ccfg key resolver ?timeout ?read_from () =
+  let result = exec ?timeout ?read_from t [| "GET"; key |] in
+  (* Remove the in-flight entry before doing any cache write: if
+     an invalidation arrives between our cache write and our table
+     remove, it would flip a dirty flag on the entry *we just took
+     care of*, and the next fetch would start with a stale flag.
+     [complete] atomically removes + reports the dirty flag. *)
+  let completion =
+    match result with
+    | Ok _ -> Inflight.complete ccfg.Client_cache.inflight key
+    | Error _ ->
+        Inflight.abandon ccfg.Client_cache.inflight key;
+        Inflight.Clean (* unused; error propagates below *)
+  in
+  (match result with
+   | Ok (Resp3.Bulk_string _ as v)
+     when completion = Inflight.Clean ->
+       Cache.put ccfg.cache key v
+   | _ -> ());
+  (* Resolve after cache-write decision so joined fibers see the
+     fully-settled cache state on wake. *)
+  (match result with
+   | Ok v -> Eio.Promise.resolve resolver (Ok v)
+   | Error e -> Eio.Promise.resolve resolver (Error e));
+  result
+
 let get ?timeout ?read_from t key =
-  (* Client-side cache path. Cache is logical: shared across all
-     shard connections, keyed by the full Valkey key. On hit, we
-     short-circuit routing entirely — no wire traffic, no replica
-     selection. On miss, we [exec] as normal; on a successful
-     Bulk_string reply, populate the cache so the next GET hits.
-     Null replies (missing key) are intentionally not cached:
-     an external SET would arrive with no prior entry to evict,
-     so a Null cache would stay stale. *)
   match t.client_cache with
-  | Some ccfg ->
-      (match Cache.get ccfg.Client_cache.cache key with
-       | Some (Resp3.Bulk_string s) -> Ok (Some s)
-       | Some Resp3.Null -> Ok None
-       | Some other ->
-           (* Cache holds a non-string value for this key —
-              someone stuffed a non-GET reply in there. Fall back
-              to the server; don't corrupt the user's result. *)
-           ignore other;
-           (match exec ?timeout ?read_from t [| "GET"; key |] with
-            | Error e -> Error e
-            | Ok v ->
-                (match v with
-                 | Resp3.Bulk_string _ -> Cache.put ccfg.cache key v
-                 | _ -> ());
-                string_option_of_reply "GET" v)
-       | None ->
-           (match exec ?timeout ?read_from t [| "GET"; key |] with
-            | Error e -> Error e
-            | Ok v ->
-                (match v with
-                 | Resp3.Bulk_string _ -> Cache.put ccfg.cache key v
-                 | _ -> ());
-                string_option_of_reply "GET" v))
   | None ->
       (match exec ?timeout ?read_from t [| "GET"; key |] with
        | Error e -> Error e
        | Ok v -> string_option_of_reply "GET" v)
+  | Some ccfg ->
+      (match Cache.get ccfg.Client_cache.cache key with
+       | Some (Resp3.Bulk_string s) -> Ok (Some s)
+       | Some Resp3.Null -> Ok None
+       | Some _ ->
+           (* Non-GET-shaped entry in cache — should not happen but
+              don't corrupt the caller; fall through as a miss and
+              let the owner/join path refresh it. *)
+           (match Inflight.begin_fetch ccfg.inflight key with
+            | Inflight.Fresh resolver ->
+                (match
+                   cached_fetch_owner t ccfg key resolver
+                     ?timeout ?read_from ()
+                 with
+                 | Error e -> Error e
+                 | Ok v -> string_option_of_reply "GET" v)
+            | Inflight.Joining promise ->
+                (match Eio.Promise.await promise with
+                 | Error e -> Error e
+                 | Ok v -> string_option_of_reply "GET" v))
+       | None ->
+           (match Inflight.begin_fetch ccfg.inflight key with
+            | Inflight.Fresh resolver ->
+                (match
+                   cached_fetch_owner t ccfg key resolver
+                     ?timeout ?read_from ()
+                 with
+                 | Error e -> Error e
+                 | Ok v -> string_option_of_reply "GET" v)
+            | Inflight.Joining promise ->
+                (match Eio.Promise.await promise with
+                 | Error e -> Error e
+                 | Ok v -> string_option_of_reply "GET" v)))
 
 let set ?timeout ?cond ?ttl ?ifeq t key value =
   let args = build_set_args ?cond ?ttl ?ifeq ~get:false key value in

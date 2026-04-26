@@ -31,10 +31,7 @@ let with_csc ~keys f =
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
   let cache = Cache.create ~byte_budget:(1024 * 1024) in
-  let ccfg : Valkey.Client_cache.t =
-    { cache; mode = Valkey.Client_cache.Default; optin = false;
-      noloop = false; entry_ttl_ms = None }
-  in
+  let ccfg = Valkey.Client_cache.make ~cache () in
   let client =
     C.connect ~sw ~net ~clock
       ~config:{ Cfg.default with client_cache = Some ccfg }
@@ -113,6 +110,72 @@ let test_flushdb_clears_whole_cache () =
   Alcotest.(check int) "cache fully cleared after FLUSHDB"
     0 (Cache.count cache)
 
+(* Parse keyspace_hits out of an INFO stats reply. *)
+let parse_keyspace_hits = function
+  | R.Bulk_string s
+  | R.Simple_string s
+  | R.Verbatim_string { data = s; _ } ->
+      (try
+         let re = Str.regexp "keyspace_hits:\\([0-9]+\\)" in
+         let _ = Str.search_forward re s 0 in
+         int_of_string (Str.matched_group 1 s)
+       with Not_found -> 0)
+  | _ -> 0
+
+let keyspace_hits aux =
+  match C.exec aux [| "INFO"; "stats" |] with
+  | Ok v -> parse_keyspace_hits v
+  | Error e -> Alcotest.failf "INFO: %a" E.pp e
+
+(* Two concurrent GETs for the same cold key must produce exactly
+   one wire fetch (single-flight). Measured via the server's
+   keyspace_hits counter before/after. *)
+let test_single_flight_concurrent_cold_gets () =
+  let k = "ocaml:csc:sflight:k" in
+  with_csc ~keys:[k] @@ fun _env client cache aux ->
+  let _ = C.exec aux [| "SET"; k; "v" |] in
+  (* Reset stats for a clean measurement. *)
+  let _ = C.exec aux [| "CONFIG"; "RESETSTAT" |] in
+  let h0 = keyspace_hits aux in
+  (* Two fibers, both GET from a cold cache. *)
+  let v1 = ref None in
+  let v2 = ref None in
+  Eio.Fiber.both
+    (fun () -> v1 := Some (C.get client k))
+    (fun () -> v2 := Some (C.get client k));
+  let h1 = keyspace_hits aux in
+  Alcotest.(check int) "one wire fetch for two concurrent cold GETs"
+    1 (h1 - h0);
+  (match !v1, !v2 with
+   | Some (Ok (Some "v")), Some (Ok (Some "v")) -> ()
+   | _ ->
+       Alcotest.fail
+         "both concurrent GETs should return Ok (Some v)");
+  Alcotest.(check bool) "cache populated after single-flight" true
+    (Option.is_some (Cache.get cache k))
+
+(* 10 concurrent GETs — stress version of the above, also
+   confirms join-count doesn't break above 2 fibers. *)
+let test_single_flight_burst () =
+  let k = "ocaml:csc:sflight:burst" in
+  with_csc ~keys:[k] @@ fun _env client _cache aux ->
+  let _ = C.exec aux [| "SET"; k; "v" |] in
+  let _ = C.exec aux [| "CONFIG"; "RESETSTAT" |] in
+  let h0 = keyspace_hits aux in
+  let results = Array.make 10 None in
+  Eio.Fiber.all
+    (List.init 10 (fun i () ->
+         results.(i) <- Some (C.get client k)));
+  let h1 = keyspace_hits aux in
+  Alcotest.(check int) "one wire fetch for 10 concurrent cold GETs"
+    1 (h1 - h0);
+  Array.iter
+    (function
+      | Some (Ok (Some "v")) -> ()
+      | _ ->
+          Alcotest.fail "every fiber should see Ok (Some v)")
+    results
+
 let tests =
   [ Alcotest.test_case "miss then hit (populate + cache-hit)" `Quick
       test_populates_then_hits;
@@ -122,4 +185,8 @@ let tests =
       test_external_del_evicts_cache;
     Alcotest.test_case "FLUSHDB clears whole cache" `Quick
       test_flushdb_clears_whole_cache;
+    Alcotest.test_case "single-flight: 2 concurrent cold GETs → 1 wire"
+      `Quick test_single_flight_concurrent_cold_gets;
+    Alcotest.test_case "single-flight: 10 concurrent cold GETs → 1 wire"
+      `Quick test_single_flight_burst;
   ]

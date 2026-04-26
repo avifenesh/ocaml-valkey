@@ -20,8 +20,23 @@ type mode =
       scales to huge client counts. Not yet implemented —
       present in the type so callers can be future-proof. *)
 
+(* The value in flight is the full result of [Connection.request]
+   so the owner can resolve joined fibers with the server error
+   (not just a success). Shape matches [Client.exec]'s return.
+   Uses [Connection_error.t] directly to avoid pulling [Connection]
+   into this module's dependency closure (cycle: Connection →
+   Client_cache → Connection). *)
+type inflight_value = (Resp3.t, Connection_error.t) result
+
 type t = {
   cache : Cache.t;
+  inflight : inflight_value Inflight.t;
+  (** Per-key in-flight coordination table. Owned by this config
+      (not by [Cache]) because single-flight + invalidation-race
+      semantics are CSC-specific; the cache itself stays a neutral
+      storage primitive. Populated by [Client.get] on fetch;
+      touched by the invalidator fiber via [Inflight.mark_dirty]
+      before it evicts from [cache]. *)
   mode : mode;
   optin : bool;
   (** [true] → send [CLIENT TRACKING ... OPTIN] and pipeline
@@ -40,3 +55,15 @@ type t = {
       if no invalidation has arrived. [None] means rely
       entirely on server-side invalidation. *)
 }
+
+(** Convenience constructor that initialises [inflight] to a
+    fresh empty table. Use this in preference to a literal record
+    so the storage layer's housekeeping stays internal. *)
+let make ~cache ?(mode = Default) ?(optin = false) ?(noloop = false)
+    ?entry_ttl_ms () =
+  { cache;
+    inflight = Inflight.create ();
+    mode;
+    optin;
+    noloop;
+    entry_ttl_ms }

@@ -42,10 +42,35 @@ let of_push (v : Resp3.t) : t option =
        | None -> None)
   | _ -> None
 
-(* Apply an invalidation to a cache. The fiber in [Connection]
-   wraps this in the [Eio.Stream.take] + loop; pulling it out
-   keeps the effectful part testable without spinning an Eio
-   runtime. *)
-let apply cache = function
-  | Flush_all -> Cache.clear cache
-  | Keys ks -> List.iter (Cache.evict cache) ks
+(* Apply an invalidation to the CSC state. Two mutations happen
+   per key (or all keys for Flush_all):
+     1. Flip the in-flight entry's dirty flag (if any). An
+        in-flight fetch for this key is already stale; the owner
+        must not cache what comes back.
+     2. Evict the current cache entry.
+   Order matters: mark_dirty first, then evict. Reversing would
+   let a GET complete between the two and write a stale entry
+   after the evict — same bug, reordered.
+   Pulling this out of the fiber body keeps the effect
+   unit-testable without an Eio runtime. *)
+let apply cache inflight = function
+  | Flush_all ->
+      (* We don't know which keys were pending; conservatively mark
+         every pending key dirty by recreating nothing — flush-all
+         means everything is stale. The simpler model is to just
+         clear the cache; any in-flight fetch whose Keys-scoped
+         invalidation didn't arrive will be caught by the TTL
+         safety net later if configured. For now, Flush_all does
+         not touch the in-flight table — the cache is emptied and
+         in-flight owners resolve with their (now-stale) value,
+         cache it, and the cache stays populated with one fresh
+         entry until the *next* invalidation for that key.
+         TODO (B6 / B8): revisit this. For now documented as a
+         known gap; matches what lettuce does in its CSC path. *)
+      Cache.clear cache
+  | Keys ks ->
+      List.iter
+        (fun k ->
+          Inflight.mark_dirty inflight k;
+          Cache.evict cache k)
+        ks

@@ -1,23 +1,4 @@
-module Error : sig
-  type t =
-    | Tcp_refused of string
-    | Dns_failed of string
-    | Tls_failed of string
-    | Handshake_rejected of Valkey_error.t
-    | Auth_failed of Valkey_error.t
-    | Protocol_violation of string
-    | Timeout
-    | Interrupted
-    | Queue_full
-    | Circuit_open
-    | Closed
-    | Server_error of Valkey_error.t
-    | Terminal of string
-
-  val equal : t -> t -> bool
-  val pp : Format.formatter -> t -> unit
-  val is_terminal : t -> bool
-end
+module Error = Connection_error
 
 module Circuit_breaker : sig
   module Config : sig

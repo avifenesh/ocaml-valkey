@@ -126,22 +126,62 @@ See `lib/client.ml` — `resolve_connection_config`, the
 `client_cache` field on `t`, and the `Client.get` branch that
 checks cache first.
 
-### … 5. Per-command coverage
+### ✅ 5. Single-flight + invalidation-race safety
 
-`MGET`, `HGET`, `HMGET`, `HGETALL`, `EXISTS`, `STRLEN`, `TYPE`.
+New `lib/inflight.ml`: a per-key table of `{promise; resolver;
+dirty}` entries. `Client.get` on miss calls
+`Inflight.begin_fetch` — `Fresh resolver` makes the fiber the
+owner of the wire fetch; `Joining promise` joins a pending
+fetch and wakes on the owner's resolution. On completion the
+owner runs `Inflight.complete`, which returns `Clean` (ok to
+cache) or `Dirty` (an invalidation raced the fetch; don't
+cache). Joined fibers see the fetched value either way — only
+the *cache write* is suppressed.
 
-### … 6. Cluster integration
+The invalidator fiber calls `Inflight.mark_dirty` **before**
+`Cache.evict` for each invalidated key, so a fetch that
+started before the invalidation but completes after finds
+`dirty = true` and skips the cache write.
 
-Per-shard tracking, single shared cache, reconnect-flush invariant.
+Lock-ordering rule: `Cache.mutex` and `Inflight.mutex` are
+independent; no path ever holds both. No deadlock possible.
 
-### … 7. Failure-mode tests
+Flush_all known gap: when `FLUSHALL`/`FLUSHDB` arrives we
+clear the cache but do not mark every in-flight fetch dirty
+(we don't index pending fetches by "all keys"). An owner
+whose fetch was in-flight at the moment of flush will cache
+the now-stale value. That window closes on the next per-key
+invalidation, TTL expiry (step 8), or reconnect-flush
+(step 7). Matches lettuce's behaviour.
+
+Refactor: extracted `Connection.Error.t` into `Connection_error`
+to break a dep cycle (Connection → Client_cache → Connection).
+`Connection.Error` is now an alias — external surface
+unchanged.
+
+Also added `Client_cache.make ~cache ()` convenience constructor;
+the record form still works but `make` initialises `inflight`.
+
+### … 6. Per-command coverage
+
+`MGET`, `HGET`, `HMGET`, `HGETALL`, `EXISTS`, `STRLEN`, `TYPE`
+go through the cache path. Today only `Client.get` does.
+
+### … 7. Cluster integration
+
+Per-shard tracking, single shared cache, reconnect-flush
+invariant, MOVED-evict on redirect.
+
+### … 8. Failure-mode tests
 
 Failover mid-cache, slot migration mid-cache, OOM under load.
 
-### … 8. Per-key TTL safety net
+### … 9. Per-key TTL safety net
 
-Optional defense-in-depth.
+Optional defense-in-depth; also plugs the Flush_all/in-flight
+race gap.
 
-### … 9. BCAST mode
+### … 10. Metrics + BCAST mode
 
-Alternate invalidation path with prefix subscription.
+Counters for hit/miss/eviction; BCAST alternative invalidation
+path with prefix subscription.

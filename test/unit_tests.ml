@@ -16,4 +16,5 @@ let () =
       "command_spec", Test_command_spec.tests;
       "cache", Test_cache.tests;
       "invalidation parser", Test_invalidation.tests;
+      "inflight", Test_inflight.tests;
     ]

@@ -102,15 +102,20 @@ let test_verb_wrong () =
 (* --- apply: the effectful half of the fiber body --------------- *)
 
 module C = Valkey.Cache
+module IF = Valkey.Inflight
 
 let bs s = R.Bulk_string s
 
+let fresh_infl () : (R.t, Valkey.Connection_error.t) result IF.t =
+  IF.create ()
+
 let test_apply_keys_evicts () =
   let c = C.create ~byte_budget:1024 in
+  let inf = fresh_infl () in
   C.put c "k1" (bs "v1");
   C.put c "k2" (bs "v2");
   C.put c "k3" (bs "v3");
-  I.apply c (I.Keys [ "k1"; "k3" ]);
+  I.apply c inf (I.Keys [ "k1"; "k3" ]);
   Alcotest.(check int) "one entry left" 1 (C.count c);
   Alcotest.(check (option reject)) "k1 gone" None (C.get c "k1");
   Alcotest.(check bool) "k2 present" true (Option.is_some (C.get c "k2"));
@@ -118,23 +123,40 @@ let test_apply_keys_evicts () =
 
 let test_apply_flush_all_clears () =
   let c = C.create ~byte_budget:1024 in
+  let inf = fresh_infl () in
   C.put c "k1" (bs "v1");
   C.put c "k2" (bs "v2");
-  I.apply c I.Flush_all;
+  I.apply c inf I.Flush_all;
   Alcotest.(check int) "empty after Flush_all" 0 (C.count c)
 
 let test_apply_keys_absent_is_noop () =
   let c = C.create ~byte_budget:1024 in
+  let inf = fresh_infl () in
   C.put c "real" (bs "v");
-  I.apply c (I.Keys [ "ghost1"; "ghost2" ]);
+  I.apply c inf (I.Keys [ "ghost1"; "ghost2" ]);
   Alcotest.(check int) "unrelated entry intact" 1 (C.count c);
   Alcotest.(check bool) "real still there" true (Option.is_some (C.get c "real"))
 
 let test_apply_keys_empty () =
   let c = C.create ~byte_budget:1024 in
+  let inf = fresh_infl () in
   C.put c "k" (bs "v");
-  I.apply c (I.Keys []);
+  I.apply c inf (I.Keys []);
   Alcotest.(check int) "empty-keys invalidation touches nothing" 1 (C.count c)
+
+(* New: verify apply flips Inflight dirty for each key. *)
+let test_apply_keys_marks_inflight_dirty () =
+  let c = C.create ~byte_budget:1024 in
+  let inf = fresh_infl () in
+  let _ = IF.begin_fetch inf "hot" in
+  let _ = IF.begin_fetch inf "cold" in
+  I.apply c inf (I.Keys [ "hot" ]);
+  (match IF.complete inf "hot" with
+   | IF.Dirty -> ()
+   | IF.Clean -> Alcotest.fail "hot should be dirty after apply");
+  (match IF.complete inf "cold" with
+   | IF.Clean -> ()
+   | IF.Dirty -> Alcotest.fail "cold should still be clean")
 
 let tests =
   [ Alcotest.test_case "keys list" `Quick test_keys;
@@ -155,4 +177,6 @@ let tests =
     Alcotest.test_case "apply Keys with absent keys is noop" `Quick
       test_apply_keys_absent_is_noop;
     Alcotest.test_case "apply Keys [] is noop" `Quick test_apply_keys_empty;
+    Alcotest.test_case "apply Keys marks inflight dirty" `Quick
+      test_apply_keys_marks_inflight_dirty;
   ]

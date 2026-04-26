@@ -27,9 +27,8 @@ let with_csc f =
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
   let cache = Valkey.Cache.create ~byte_budget:(1024 * 1024) in
-  let ccfg : Valkey.Client_cache.t =
-    { cache; mode = Valkey.Client_cache.Default; optin = true;
-      noloop = false; entry_ttl_ms = None }
+  let ccfg =
+    Valkey.Client_cache.make ~cache ~optin:true ()
   in
   let connection =
     { Conn.Config.default with client_cache = Some ccfg }

@@ -24,8 +24,16 @@ type t =
     treats [None] as "not ours, skip". *)
 val of_push : Resp3.t -> t option
 
-(** [apply cache inv] performs the cache mutation the invalidation
-    demands: [Flush_all] clears the cache; [Keys ks] evicts each
-    key. Pulled out of the fiber body so its effect is unit-
-    testable without an Eio runtime. *)
-val apply : Cache.t -> t -> unit
+(** [apply cache inflight inv] performs the CSC mutations for an
+    invalidation:
+    - [Flush_all] clears the cache.
+    - [Keys ks] for each key, marks the in-flight fetch (if any)
+      dirty *before* evicting the cache entry. Order matters to
+      close the fetch-completion race: see [lib/invalidation.ml]
+      for the exact reasoning.
+    Pulled out of the fiber body so its effect is unit-testable
+    without an Eio runtime. *)
+val apply :
+  Cache.t ->
+  (Resp3.t, Connection_error.t) result Inflight.t ->
+  t -> unit
