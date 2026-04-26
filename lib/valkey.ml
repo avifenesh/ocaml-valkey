@@ -21,3 +21,4 @@ module Cluster_pubsub = Cluster_pubsub
 module Named_commands = Named_commands
 module Cache = Cache
 module Client_cache = Client_cache
+module Invalidation = Invalidation

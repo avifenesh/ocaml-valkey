@@ -70,9 +70,32 @@ steps can consume invalidation pushes. See
 [`lib/connection.ml`](../lib/connection.ml) (`run_client_tracking`,
 `full_handshake`).
 
-### … 3. Invalidator fiber
+### ✅ 3. Invalidation parser + invalidator fiber
 
-Drains RESP3 push frames, parses invalidation messages, evicts.
+`lib/invalidation.ml` translates a parsed RESP3 push frame into
+`Invalidation.t` (`Keys [...]` or `Flush_all`). Malformed or
+not-ours pushes return `None` and are skipped — no partial eviction
+on spec violations.
+
+Routing happens at the source. `parse_worker` in `Connection`
+classifies each incoming push: invalidations go on a dedicated
+`invalidations : Invalidation.t Eio.Stream.t`; everything else
+(pubsub deliveries, `tracking-redir-broken`, future pushes) stays
+on `pushes` where pubsub consumers already read. Rationale: one
+consumer per stream avoids fan-out complexity; pubsub users who
+also enable CSC are unaffected.
+
+An invalidator fiber is spawned automatically whenever
+`client_cache = Some _`. It loops on `Eio.Stream.take
+t.invalidations` and calls `Invalidation.apply cache inv` —
+`Keys` evicts each, `Flush_all` clears the whole cache. Exits
+cleanly when the connection's `closing` atomic flips or the
+supervisor resolves `cancel_signal`.
+
+`Invalidation.apply` is a plain function (no Eio), so its
+behaviour is unit-tested directly against `Cache.t`.
+
+Nothing populates the cache yet — that's step 4.
 
 ### … 4. Race-safe GET path
 

@@ -14,7 +14,8 @@
           test_discovery
           test_redirect
           test_command_spec
-          test_cache)
+          test_cache
+          test_invalidation)
  (libraries valkey alcotest))
 
 ; Integration tests — need a live Valkey / cluster. Built as a
@@ -48,5 +49,6 @@
           test_discovery
           test_redirect
           test_command_spec
-          test_cache)
+          test_cache
+          test_invalidation)
  (libraries valkey alcotest eio_main))

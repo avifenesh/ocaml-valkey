@@ -15,4 +15,5 @@ let () =
       "redirect", Test_redirect.tests;
       "command_spec", Test_command_spec.tests;
       "cache", Test_cache.tests;
+      "invalidation parser", Test_invalidation.tests;
     ]

@@ -125,6 +125,13 @@ val send_fire_and_forget :
 
 val pushes : t -> Resp3.t Eio.Stream.t
 
+val invalidations : t -> Invalidation.t Eio.Stream.t
+(** CSC invalidation pushes routed out of the general [pushes]
+    stream. The invalidator fiber (spawned automatically when
+    [Config.t.client_cache] is [Some _]) drains this; applications
+    shouldn't need to touch it. Exposed for tests and for users
+    wiring their own bespoke cache. *)
+
 val availability_zone : t -> string option
 
 val server_info : t -> Resp3.t option

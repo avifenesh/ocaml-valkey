@@ -320,6 +320,14 @@ type t = {
   budget : Byte_sem.t;
   config : Config.t;
   pushes : Resp3.t Eio.Stream.t;
+  (* Non-invalidation pushes (pubsub deliveries, tracking-redir-broken,
+     future server-side pushes) — same stream users consumed before
+     CSC landed, semantics unchanged. *)
+  invalidations : Invalidation.t Eio.Stream.t;
+  (* CSC invalidation pushes, post-classification. Drained by the
+     invalidator fiber when client_cache is configured. An Eio.Stream
+     with a generous cap so a bursty flush doesn't back-pressure
+     the parse worker. *)
   host : string;                            (* for telemetry only *)
   port : int;                               (* for telemetry only *)
   connect_once : unit -> (socket, Error.t) result;
@@ -667,7 +675,14 @@ let parse_worker (t : t) (byte_src : Resp3_parser.byte_source) : unit =
       match outcome with
       | `Cancelled | `Err -> ()
       | `Read (Push _ as p) ->
-          Eio.Stream.add t.pushes p;
+          (* Route CSC invalidation frames onto a dedicated stream so
+             the invalidator fiber can drain them without racing
+             pubsub consumers on [pushes]. Everything else (pubsub
+             deliveries, tracking-redir-broken, future pushes) stays
+             on [pushes] — semantics unchanged for those consumers. *)
+          (match Invalidation.of_push p with
+           | Some inv -> Eio.Stream.add t.invalidations inv
+           | None -> Eio.Stream.add t.pushes p);
           loop ()
       | `Read value ->
           let entry =
@@ -919,6 +934,7 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default)
     budget = Byte_sem.make config.max_queued_bytes;
     config;
     pushes = Eio.Stream.create config.push_buffer_size;
+    invalidations = Eio.Stream.create config.push_buffer_size;
     host;
     port;
     connect_once;
@@ -961,9 +977,37 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default)
    | None -> ()
    | Some interval ->
        Eio.Fiber.fork ~sw (fun () -> keepalive_loop t interval));
+  (* Invalidator fiber: drain [t.invalidations] and evict/clear the
+     user's cache. Only runs when a cache is configured; otherwise
+     the stream would fill and backpressure the parser, so we'd
+     rather have the fiber present and bored than absent and
+     harmful. Cheap — blocks on [take] when idle. *)
+  (match config.client_cache with
+   | None -> ()
+   | Some ccfg ->
+       Eio.Fiber.fork ~sw (fun () ->
+           let rec loop () =
+             if Atomic.get t.closing then ()
+             else begin
+               let inv =
+                 Eio.Fiber.first
+                   (fun () -> `Inv (Eio.Stream.take t.invalidations))
+                   (fun () ->
+                     Eio.Promise.await t.cancel_signal;
+                     `Cancelled)
+               in
+               match inv with
+               | `Cancelled -> ()
+               | `Inv inv ->
+                   Invalidation.apply ccfg.Client_cache.cache inv;
+                   loop ()
+             end
+           in
+           try loop () with _ -> ()));
   t
 
 let pushes t = t.pushes
+let invalidations t = t.invalidations
 let availability_zone t = t.availability_zone
 let server_info t = t.server_info
 let state t = t.state
