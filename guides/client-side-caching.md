@@ -332,9 +332,44 @@ Exposed at the Client layer as `Client.cache_metrics : t ->
 Cache.metrics option`. Returns `None` when caching isn't
 enabled.
 
-### … 10b. BCAST mode
+### ✅ 10b. BCAST mode
 
-Alternative invalidation path where the server pushes invalidations
-for every key under a declared prefix instead of per-key tracking.
-Useful for fleet-scale workloads where the per-client tracking
-table grows unboundedly on the server.
+Prefix-based tracking. Instead of the server maintaining a
+per-client table of keys this client has read, the client
+declares prefixes; the server broadcasts invalidations for any
+write to any key matching any declared prefix. Scales to fleet
+deployments where a per-key tracking table on the server would
+blow up.
+
+Setup via `Client_cache.t.mode = Bcast { prefixes }`.
+`Connection`'s `full_handshake` emits
+`CLIENT TRACKING ON BCAST PREFIX <p1> [PREFIX <p2> ...]`; the
+same handshake replay on reconnect already covers BCAST.
+
+The wire frame for BCAST invalidations is **identical** to
+default-mode invalidation (`> "invalidate" [keys]`) — confirmed
+empirically against Valkey 9. Our existing `Invalidation.of_push`
+parser handles both. No code changes needed in `lib/invalidation.ml`
+or the invalidator fiber.
+
+Caveats:
+- **No client-side prefix-overlap validation yet.** Server
+  rejects overlapping prefixes (e.g. `"user:"` and
+  `"user:admin:"`) with `ERR Tracking prefix <p> already
+  specified`. `Connection.run_client_tracking` surfaces that
+  server error and fails the handshake cleanly. Could
+  pre-check client-side; not done.
+- **In BCAST mode, invalidations arrive for keys we never
+  read.** If the cache was pre-populated by a matching key's
+  read and a sibling key under the same prefix is written,
+  only the written key's name is in the push's keys array —
+  the sibling cache entries stay put. This is what BCAST
+  promises: "invalidate keys matching the prefix," not "flush
+  everything under the prefix." Proved by the `out-of-prefix
+  writes leave cache alone` test.
+
+Integration tests (`test/test_csc_bcast.ml`):
+- BCAST flag + declared prefix show up in `CLIENT
+  TRACKINGINFO`.
+- External SET on a prefix-match key evicts our cached entry.
+- External SET on a key *outside* the prefix does not evict.
