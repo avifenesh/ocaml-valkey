@@ -9,27 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — OpenTelemetry tracing
 
-- Library now emits OpenTelemetry spans for connect / handshake,
-  cluster discover, and topology refresh. Span names: `valkey.connect`,
-  `valkey.cluster.discover`, `valkey.cluster.refresh`. With no exporter
-  configured the cost is near-zero. Per-command spans are intentionally
-  not emitted — see `docs/observability.md` for the rationale,
-  attribute schema, and the redaction invariants the library
-  enforces (no auth credentials, command keys, or values in spans).
+- Library emits OpenTelemetry spans for the bounded operations
+  worth knowing latency and failure-mode of: `valkey.connect`
+  (TCP + TLS + `HELLO`/`SELECT`, one per (re)connect),
+  `valkey.cluster.discover`, `valkey.cluster.refresh`. Outcomes
+  (`agreed` / `agreed_fallback` / `no_agreement`) recorded as span
+  attributes. With no exporter configured the cost is near-zero.
+  Per-command spans intentionally not emitted (~150 k req/s would
+  dominate trace volume — apps that need them wrap their own call
+  sites). See `docs/observability.md` for setup, attribute schema,
+  and the redaction invariants enforced in `lib/observability.ml`
+  (no auth credentials, no command keys, no command values, no
+  server error message bodies inside spans).
 - New dependency: `opentelemetry >= 0.90`.
 
-### Security — narrowed wrap_with_tls catch + non-leaking error payloads
+### Security audit pass (Phase 2.5)
 
-- `Connection.wrap_with_tls` no longer catches arbitrary exceptions
-  as `Tls_failed`; only `Tls_eio.Tls_alert`, `Tls_eio.Tls_failure`,
-  `End_of_file`, and `Eio.Io _` map to that variant. Anything else
-  propagates so internal bugs surface instead of being mislabeled.
-- `Tcp_refused`/`Dns_failed`/`Tls_failed` payloads no longer carry
-  `Printexc.to_string` of the underlying exception (which prints
-  constructor args, paths, raw cert bytes). Replaced with a small
-  classifier producing stable short kinds (`peer_closed`, `tls_alert`,
-  `tls_failure`, `io_error`, errno text via `Unix.error_message`).
-  Programmatic handling stays on the `Error.t` variant.
+Reviewed against threat model: trusted Valkey cluster (operators
+own all members), TLS chain validated when enabled. Three items
+fixed in this pass; the rest were either out-of-scope under that
+model or features Valkey itself doesn't support (e.g. per-node
+SNI). Items addressed:
+
+- **Narrowed `Connection.wrap_with_tls` catch.** Previously any
+  exception inside `Tls_eio.client_of_flow` was wrapped as
+  `Tls_failed`, masking internal bugs. Now only the actual
+  handshake-time exceptions map to that variant
+  (`Tls_eio.Tls_alert`, `Tls_eio.Tls_failure`, `End_of_file`,
+  `Eio.Io _`); anything else propagates.
+- **Non-leaking error payloads.** `Tcp_refused`/`Dns_failed`/
+  `Tls_failed` no longer carry `Printexc.to_string` of the
+  underlying exception (which prints constructor args, internal
+  paths, raw cert bytes). Replaced with a small classifier
+  producing stable short kinds (`peer_closed`, `tls_alert`,
+  `tls_failure`, `io_error`, errno text via
+  `Unix.error_message`). Programmatic handling stays on the
+  `Error.t` variant.
+- **Observability gap closed** (see "Added" above). Auth events,
+  redirect outcomes, and refresh results are now visible in
+  traces.
 
 ## [0.2.0] — 2026-04-21
 
