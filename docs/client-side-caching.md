@@ -257,9 +257,29 @@ Integration tests (`test/test_csc_cluster.ml`, needs
   cache (one null-body invalidation per shard, all evicting
   the same shared cache).
 
-### … 8. Failure-mode tests
+### ✅ 8. Lifecycle failure-mode tests
 
-Failover mid-cache, slot migration mid-cache, OOM under load.
+Prove the flush invariants hold end-to-end against a real
+server / cluster:
+
+- **Standalone reconnect**: populate cache, `CLIENT KILL` self,
+  assert `Cache.count = 0` after reconnect, then assert a fresh
+  read re-populates (tracking is back). Validates B7.2.
+- **Cluster failover**: populate cache with keys on two shards,
+  pick a replica from `CLUSTER NODES`, force promotion with
+  `CLUSTER FAILOVER FORCE`, assert cache cleared within a few
+  seconds. Validates B7.1 (topology-refresh flush) + B7.2
+  (per-connection reconnect flush) together — whichever path
+  fires first does the clear.
+
+Tests live in `test/test_csc_lifecycle.ml`, both marked `Slow`
+(multi-second by design). Cluster test skips gracefully when
+the compose cluster isn't reachable.
+
+Slot-migration-under-load and OOM are not covered here; the
+former needs orchestrating a live `CLUSTER SETSLOT` loop with
+concurrent cached reads, the latter needs a stress harness.
+Deferred until there's an incident report asking for them.
 
 ### … 9. Per-key TTL safety net
 

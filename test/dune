@@ -44,6 +44,7 @@
           test_csc_hash_set
           test_csc_mget
           test_csc_cluster
+          test_csc_lifecycle
           test_resp3
           test_resp3_roundtrip
           test_retry_state
