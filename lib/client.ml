@@ -314,19 +314,196 @@ let setnx ?timeout t key value =
   bool_from_integer "SETNX"
     (exec ?timeout t [| "SETNX"; key; value |])
 
-let mget ?timeout ?read_from t keys =
+(* ---- MGET with per-key cache + scatter-gather over cache state
+
+   The input keys are split into three disjoint groups:
+     Hit     — in cache already; no wire
+     Batch   — not in cache and not in flight; we own a fresh fetch
+     Joining — not in cache but an owner is already fetching; await
+
+   We issue ONE wire MGET containing only the Batch keys. The
+   reply's elements are aligned with that sub-list; we walk both
+   together and resolve the per-key inflight promise for each
+   batched key (so joiners awaiting those keys wake). Then we
+   merge Hit + Batch-results + Joining-results back into the
+   caller's input order.
+
+   Inherits single-flight and invalidation-race handling from
+   [Inflight]:
+     - mark_dirty (invalidator fiber) flips an in-flight entry's
+       dirty flag per key.
+     - complete returns Clean/Dirty per key; we skip Cache.put
+       for Dirty keys.
+
+   Semantics match single-key [get]:
+     - Bulk_string reply cached under the key.
+     - Null reply never cached (no server invalidation will ever
+       evict a negative entry; matches get's behaviour). *)
+
+(* One MGET-element decoder shared by cache-hit, batch-return,
+   and joiner-await paths so they all see the same shape. *)
+let decode_mget_element cmd = function
+  | Resp3.Null -> Ok None
+  | Resp3.Bulk_string s -> Ok (Some s)
+  | other -> Error (protocol_violation cmd other)
+
+(* Uncached MGET — current behaviour, single wire command. *)
+let mget_uncached ?timeout ?read_from t keys =
   let args = Array.of_list ("MGET" :: keys) in
   match exec ?timeout ?read_from t args with
   | Error e -> Error e
   | Ok (Resp3.Array items) ->
       let rec convert acc = function
         | [] -> Ok (List.rev acc)
-        | Resp3.Null :: rest -> convert (None :: acc) rest
-        | Resp3.Bulk_string s :: rest -> convert (Some s :: acc) rest
-        | other :: _ -> Error (protocol_violation "MGET element" other)
+        | v :: rest ->
+            (match decode_mget_element "MGET" v with
+             | Ok o -> convert (o :: acc) rest
+             | Error e -> Error e)
       in
       convert [] items
   | Ok v -> Error (protocol_violation "MGET" v)
+
+(* Split [keys] into (hit_values_by_index, batch_with_resolvers,
+   joiners_with_promise).  The returned [hit_values_by_index] and
+   [joiners] carry the caller's original index so we can rebuild
+   ordered output. [batch_with_resolvers] preserves key order
+   both in [keys] (the wire subset) and [resolvers]; the MGET
+   reply aligns with that same order. *)
+let classify_mget_keys ccfg keys =
+  let hits = ref [] in
+  let batch_keys = ref [] in          (* rev accumulator *)
+  let batch_resolvers = ref [] in     (* rev accumulator *)
+  let joiners = ref [] in
+  List.iteri
+    (fun i k ->
+      match Cache.get ccfg.Client_cache.cache k with
+      | Some (Resp3.Bulk_string s) -> hits := (i, Some s) :: !hits
+      | Some Resp3.Null -> hits := (i, None) :: !hits
+      | Some _ | None ->
+          (* wrong-shape cached entries treated as misses *)
+          (match Inflight.begin_fetch ccfg.inflight k with
+           | Inflight.Fresh resolver ->
+               batch_keys := k :: !batch_keys;
+               batch_resolvers := (i, k, resolver) :: !batch_resolvers
+           | Inflight.Joining promise ->
+               joiners := (i, k, promise) :: !joiners))
+    keys;
+  (* Reverse only the batch lists, not hits/joiners — merge
+     below doesn't care about their order. The batch subset is
+     sent in insertion order, which matches the reply order. *)
+  (!hits,
+   List.rev !batch_keys,
+   List.rev !batch_resolvers,
+   !joiners)
+
+(* Resolve every batched resolver with [Error e] (wire failure
+   path) or pair-wise with its element from the reply (success). *)
+let finalise_batch_success ccfg ~batch_resolvers ~reply_items =
+  let n = List.length batch_resolvers in
+  let got = List.length reply_items in
+  if n <> got then
+    Error
+      (Connection_error.Protocol_violation
+         (Printf.sprintf
+            "MGET: server returned %d elements for %d keys" got n))
+  else begin
+    (* Walk both lists in order, completing inflight and resolving
+       each per-key promise with the element we received. *)
+    let ok = ref true in
+    let decoded_batch = Hashtbl.create n in  (* idx -> string option *)
+    List.iter2
+      (fun (idx, key, resolver) reply_v ->
+        let completion = Inflight.complete ccfg.Client_cache.inflight key in
+        (match reply_v with
+         | Resp3.Bulk_string _ when completion = Inflight.Clean ->
+             Cache.put ccfg.cache key reply_v
+         | _ -> ());
+        Eio.Promise.resolve resolver (Ok reply_v);
+        match decode_mget_element "MGET" reply_v with
+        | Ok o -> Hashtbl.replace decoded_batch idx o
+        | Error _ as e ->
+            if !ok then begin
+              ok := false;
+              ignore e                (* returned below *)
+            end)
+      batch_resolvers reply_items;
+    if not !ok then
+      Error
+        (Connection_error.Protocol_violation
+           "MGET: non-string non-null element")
+    else Ok decoded_batch
+  end
+
+let finalise_batch_error ccfg ~batch_resolvers ~err =
+  List.iter
+    (fun (_idx, key, resolver) ->
+      Inflight.abandon ccfg.Client_cache.inflight key;
+      Eio.Promise.resolve resolver (Error err))
+    batch_resolvers
+
+let await_joiner (i, _k, promise) =
+  match Eio.Promise.await promise with
+  | Ok v -> (match decode_mget_element "MGET" v with
+             | Ok o -> Ok (i, o)
+             | Error _ as e -> e)
+  | Error e -> Error e
+
+(* Merge hits + decoded_batch + joiner results back into input
+   order. *)
+let merge_mget_results ~n ~hits ~decoded_batch ~joiner_results =
+  let arr = Array.make n None in
+  List.iter (fun (i, v) -> arr.(i) <- v) hits;
+  Hashtbl.iter (fun i v -> arr.(i) <- v) decoded_batch;
+  List.iter (fun (i, v) -> arr.(i) <- v) joiner_results;
+  Array.to_list arr
+
+let mget_cached t ccfg ?timeout ?read_from keys =
+  let n = List.length keys in
+  let (hits, batch_keys, batch_resolvers, joiners) =
+    classify_mget_keys ccfg keys
+  in
+  (* Fire the batched wire MGET first; joiners wait on someone
+     else's in-flight fetch, so we don't block ourselves waiting
+     for them before we've issued our own wire. Then await
+     joiners; we could in theory fiber-fork these but keeping the
+     simpler sequential version — the owner of each joined key
+     is progressing independently on their own fiber. *)
+  let batch_outcome : _ result =
+    match batch_keys with
+    | [] -> Ok (Hashtbl.create 0)
+    | _ ->
+        let args = Array.of_list ("MGET" :: batch_keys) in
+        (match exec ?timeout ?read_from t args with
+         | Error e ->
+             finalise_batch_error ccfg ~batch_resolvers ~err:e;
+             Error e
+         | Ok (Resp3.Array items) ->
+             finalise_batch_success ccfg ~batch_resolvers ~reply_items:items
+         | Ok v ->
+             let err = protocol_violation "MGET" v in
+             finalise_batch_error ccfg ~batch_resolvers ~err;
+             Error err)
+  in
+  match batch_outcome with
+  | Error e -> Error e
+  | Ok decoded_batch ->
+      (* Await joiners; if any errored, propagate. *)
+      let rec join_all acc = function
+        | [] -> Ok (List.rev acc)
+        | j :: rest ->
+            (match await_joiner j with
+             | Ok pair -> join_all (pair :: acc) rest
+             | Error e -> Error e)
+      in
+      (match join_all [] joiners with
+       | Error e -> Error e
+       | Ok joiner_results ->
+           Ok (merge_mget_results ~n ~hits ~decoded_batch ~joiner_results))
+
+let mget ?timeout ?read_from t keys =
+  match t.client_cache with
+  | None -> mget_uncached ?timeout ?read_from t keys
+  | Some ccfg -> mget_cached t ccfg ?timeout ?read_from keys
 
 type value_type =
   | T_none

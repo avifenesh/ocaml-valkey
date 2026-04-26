@@ -18,6 +18,8 @@ let () =
         Test_csc_invalidation.tests;
       "csc hash+set (needs docker valkey :6379 >=7.4)",
         Test_csc_hash_set.tests;
+      "csc mget (needs docker valkey :6379 >=7.4)",
+        Test_csc_mget.tests;
       "sorted set (needs docker valkey :6379)", Test_sorted_set.tests;
       "transaction (needs docker valkey :6379)", Test_transaction.tests;
       "pubsub (needs docker valkey :6379)", Test_pubsub.tests;

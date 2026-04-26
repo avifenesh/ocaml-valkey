@@ -42,6 +42,7 @@
           test_csc_tracking
           test_csc_invalidation
           test_csc_hash_set
+          test_csc_mget
           test_resp3
           test_resp3_roundtrip
           test_retry_state

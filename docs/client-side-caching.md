@@ -189,11 +189,35 @@ Deliberately **not** cached in this library:
   cache entry these would ride on. Users who ask for these
   pay one round-trip; not worth a specialised path.
 
-### … 6b. MGET cache coverage
+### ✅ 6b. MGET scatter-gather over cache state
 
-MGET can be split into per-key cache lookups + a batched fetch
-of misses, with per-key single-flight reuse. Own step because
-partial-hit logic is non-trivial.
+`Client.mget` splits input keys into three disjoint groups per
+call:
+
+- **Hit** — in cache already; no wire.
+- **Batch** — not in cache, no in-flight fetch; this fiber owns
+  the fresh MGET for these keys.
+- **Joining** — not in cache but another fiber's in-flight
+  fetch already covers these keys; await the per-key promise.
+
+We issue ONE wire MGET containing only the Batch keys. Reply
+elements align with that sub-list; we walk both together,
+calling `Inflight.complete` per key (respecting the dirty flag
+from a mid-flight invalidation), then `Cache.put` on
+`Clean + Bulk_string` elements only (Null is not cached —
+matches `Client.get`). The per-key in-flight resolvers are
+resolved with the per-key element so any joiners on other
+fibers wake. Results from all three groups merge back into the
+caller's input order via an indexed array.
+
+All-hit MGET issues zero wire commands. Partial-hit MGET
+issues one wire command of length |misses|, not |total|.
+
+If the batched MGET fails at the wire level, every batched
+key's inflight entry is `abandon`ed and each resolver is
+resolved with the error so joiners propagate it. The call
+returns `Error e`; hits and joiners-that-succeeded do not
+override the failure.
 
 ### … 7. Cluster integration
 
