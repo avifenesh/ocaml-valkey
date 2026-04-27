@@ -846,38 +846,37 @@ let send_fire_and_forget t args =
             Byte_sem.release t.budget size;
             Ok ()
 
-(* Pipelined atomic two-frame submit. Builds two wire frames,
-   concatenates them into a single [queued] entry with two
-   matching-queue resolvers, and enqueues as one indivisible
-   unit. The writer flushes both frames back-to-back; the
-   parser pulls two replies in order and resolves both
-   promises FIFO.
-
-   Used for OPTIN CSC where the spec requires
-   [CLIENT CACHING YES] to be sent immediately before the
-   tracked read with no other command between them on the
-   wire (verified empirically: the flag is consumed by exactly
-   the next single command). A pair of separate [request]
-   calls would NOT satisfy this — another fiber's enqueue can
-   land between them.
+(* Pipelined atomic N-frame submit. Builds the wires, enqueues a
+   single [queued] entry holding all of them, and awaits the N
+   replies in order. The writer flushes the wire list via
+   scatter-gather so frames are wire-adjacent; the parser pulls
+   replies in order and resolves the per-frame promises FIFO.
 
    The outer [Error.t] reports failures that prevented the
-   submit (Closed, Circuit_open, Queue_full). The inner pair
-   carries each frame's reply independently — frame 1 may
-   succeed (Simple_string "OK") while frame 2 errors
-   (WRONGTYPE etc.), or either may fail with transport
-   errors if the connection drops mid-submit. *)
-let request_pair ?timeout t args1 args2 =
+   submit (Closed, Circuit_open, Queue_full). The inner list
+   carries each frame's reply independently — any frame may
+   surface a [Server_error] without affecting the others, or
+   any may fail with transport errors if the connection drops
+   mid-submit.
+
+   On any await raising (Eio cancellation, switch teardown), the
+   not-yet-awaited entries are flagged [abandoned] so the writer
+   / parser path skips their resolution.
+
+   Public {!request_pair} and {!request_triple} are typed-tuple
+   wrappers; OPTIN ([CLIENT CACHING YES] + read) uses pair, ASK
+   redirects on OPTIN (which need [ASKING] + [CACHING YES] +
+   read as three wire-adjacent frames) use triple. *)
+let request_n_internal ?timeout t (arg_arrays : string array list)
+    : ((Resp3.t, Error.t) result list, Error.t) result =
   let timeout =
     match timeout with
     | Some _ as v -> v
     | None -> t.config.command_timeout
   in
-  let wire1 = Resp3_writer.command_to_cstruct args1 in
-  let wire2 = Resp3_writer.command_to_cstruct args2 in
-  let size1 = Cstruct.length wire1 in
-  let size2 = Cstruct.length wire2 in
-  let total = size1 + size2 in
+  let wires = List.map Resp3_writer.command_to_cstruct arg_arrays in
+  let sizes = List.map Cstruct.length wires in
+  let total = List.fold_left ( + ) 0 sizes in
   if total > t.config.max_queued_bytes then Error Error.Queue_full
   else
     let cb_decision =
@@ -891,33 +890,41 @@ let request_pair ?timeout t args1 args2 =
         let was_probe = decision = `Allow_probe in
         let run () =
           Byte_sem.acquire t.budget total;
-          let p1, r1 = Eio.Promise.create () in
-          let p2, r2 = Eio.Promise.create () in
-          let e1 = { resolver = r1; size = size1; abandoned = false } in
-          let e2 = { resolver = r2; size = size2; abandoned = false } in
-          match try_enqueue t
-                  { entries = [ e1; e2 ]; wires = [ wire1; wire2 ] }
-          with
+          let promise_resolver_pairs =
+            List.map (fun _ -> Eio.Promise.create ()) wires
+          in
+          let entries =
+            List.map2
+              (fun (_, resolver) size ->
+                { resolver; size; abandoned = false })
+              promise_resolver_pairs sizes
+          in
+          match try_enqueue t { entries; wires } with
           | `Dead e ->
               Byte_sem.release t.budget total;
               Error e
           | `In_queue ->
-              (* Don't shadow the [r1] / [r2] resolver bindings
-                 captured in [e1.resolver] / [e2.resolver] — use
-                 distinct names for the awaited values. *)
-              let v1 =
-                try Eio.Promise.await p1
-                with exn ->
-                  e1.abandoned <- true; e2.abandoned <- true;
-                  raise exn
+              (* Sequential await preserving the pair's
+                 abandonment semantics: if [await] raises at
+                 frame k, mark e_k onward as abandoned (entries
+                 before k were already resolved). *)
+              let rec await_in_order acc remaining_entries
+                  remaining_promises =
+                match remaining_entries, remaining_promises with
+                | [], [] -> Ok (List.rev acc)
+                | e :: e_rest, (p, _) :: p_rest ->
+                    (match
+                       try Ok (Eio.Promise.await p)
+                       with exn ->
+                         List.iter (fun e' -> e'.abandoned <- true)
+                           (e :: e_rest);
+                         raise exn
+                     with
+                     | Ok v -> await_in_order (v :: acc) e_rest p_rest
+                     | Error _ as e -> e)
+                | _ -> assert false  (* same length by construction *)
               in
-              let v2 =
-                try Eio.Promise.await p2
-                with exn ->
-                  e2.abandoned <- true;
-                  raise exn
-              in
-              Ok (v1, v2)
+              await_in_order [] entries promise_resolver_pairs
         in
         let result =
           match timeout with
@@ -927,16 +934,19 @@ let request_pair ?timeout t args1 args2 =
                | Ok v -> v
                | Error `Timeout -> Error Error.Timeout)
         in
-        (* Trip the breaker only on transport-level outcomes, the
-           same rule [request] applies. A successful submit where
-           one inner frame returned Server_error counts as
-           transport-success. *)
+        (* Same circuit-breaker policy as [request]: only count
+           transport-level outcomes, treat any per-frame
+           [Server_error] as transport-success. *)
         let transport_outcome =
           match result with
           | Error e -> Error e
-          | Ok ((Error e), _) -> Error e
-          | Ok (_, (Error e)) -> Error e
-          | Ok (Ok _, Ok _) -> Ok Resp3.Null  (* shape-irrelevant *)
+          | Ok values ->
+              (match
+                 List.find_opt (function Error _ -> true | _ -> false)
+                   values
+               with
+               | Some (Error e) -> Error e
+               | _ -> Ok Resp3.Null)
         in
         (match t.cb with
          | None -> ()
@@ -944,6 +954,26 @@ let request_pair ?timeout t args1 args2 =
              Circuit_breaker.on_result cb ~was_probe (t.now ())
                transport_outcome);
         result
+
+(* See [request_n_internal]. Used for OPTIN's [CLIENT CACHING
+   YES + read] pair. *)
+let request_pair ?timeout t args1 args2 =
+  match request_n_internal ?timeout t [ args1; args2 ] with
+  | Error _ as e -> e
+  | Ok [ r1; r2 ] -> Ok (r1, r2)
+  | Ok _ -> assert false
+
+(* See [request_n_internal]. Used for OPTIN's ASK-redirect
+   recovery: [ASKING + CLIENT CACHING YES + read] as one
+   wire-adjacent submit. Three frames are needed because
+   [ASKING] consumes the slot's per-key migration flag, then
+   [CLIENT CACHING YES] arms tracking for the immediately-next
+   command, then the read carries the actual key. *)
+let request_triple ?timeout t args1 args2 args3 =
+  match request_n_internal ?timeout t [ args1; args2; args3 ] with
+  | Error _ as e -> e
+  | Ok [ r1; r2; r3 ] -> Ok (r1, r2, r3)
+  | Ok _ -> assert false
 
 let keepalive_loop t interval =
   let rec loop () =

@@ -226,30 +226,20 @@ First-run sanity steps on Ubuntu:
 
 These are documented here rather than as stub code or dead TODOs:
 
-1. **OPTIN ASK redirect retry.** Cluster + OPTIN handles MOVED
-   transparently via `Router.pair`. ASK is rare and currently
-   surfaces as `Server_error` to the caller — handling it
-   correctly needs a 3-frame submit (`ASKING + CACHING YES +
-   read`) since `request_pair` is two-frame; would generalize to
-   a `request_n` primitive or a special-case ASKING-aware pair.
-2. **Per-key TTL refresh on hit.** Right now a cached entry's TTL
+1. **Per-key TTL refresh on hit.** Right now a cached entry's TTL
    counts from its last `put`, not its last `get`. Some users expect
    sliding-window TTL; we don't do that. If wanted: add an
    `expires_at` refresh inside `Cache.get`'s hit branch.
-3. **OTel cache metrics bridge.** `Client.cache_metrics` returns a
-   snapshot record. An OTel meter that observes those counters on an
-   interval would let operators chart cache hit-rate without bespoke
-   code. The OTel infra from Phase 2.5 is already wired.
-4. **BCAST prefix-overlap validation.** The server rejects overlapping
+2. **BCAST prefix-overlap validation.** The server rejects overlapping
    prefixes and we surface the error; a client-side pre-check would
    give a better error at build time but is not load-bearing.
-5. **MGET error semantics when a joiner's owner fails.** If the batched
+3. **MGET error semantics when a joiner's owner fails.** If the batched
    MGET fails, every batched-key resolver is resolved with the error
    and the overall result is `Error e` — but the hit group's results
    are discarded. That matches the expected `Client.mget` contract
    (all-or-nothing). If someone wants partial-result semantics we'd
    need a new API.
-6. **OOM stress harness.** Deliberately long-running, not worth the
+4. **OOM stress harness.** Deliberately long-running, not worth the
    CI budget until we have a user report.
 
 ---
@@ -283,12 +273,14 @@ implementing.
 
 ### CSC follow-ups (optional)
 
-- [ ] **OTel bridge for `cache_metrics`.** Meter + exporter callback.
-      ~30 LOC + a docs note.
-- [ ] **OPTIN ASK redirect retry.** MOVED is handled transparently;
-      ASK currently surfaces. Needs a 3-frame submit primitive.
-- [ ] **Slot-migration stress test.** When there's a real incident
-      report to defend against.
+- [x] **OTel bridge for `cache_metrics`.** Shipped — see
+      `Valkey.Observability.observe_cache_metrics`.
+- [x] **OPTIN ASK redirect retry.** Shipped — `Connection.request_triple`
+      drives `ASKING + CLIENT CACHING YES + read` as one wire-adjacent
+      submit; `Cluster_router.make_pair`'s ASK arm wires it.
+- [ ] **Slot-migration stress test.** Real `CLUSTER SETSLOT` migration
+      loop with concurrent cached reads, validates retry path under
+      contention. Will exercise the ASK-retry path empirically.
 
 ---
 

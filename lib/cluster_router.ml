@@ -241,9 +241,10 @@ let handle_retries ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
   loop 0 (dispatch ())
 
 (* Pair-shape mirror of [handle_retries] for OPTIN CSC reads.
-   Retry policy matches [exec] one-to-one. ASK on the read is
-   not retried — it would need [ASKING + CACHING YES + read]
-   as three wire-adjacent frames; [request_pair] is two-frame. *)
+   Retry policy matches [exec] one-to-one. ASK on the read uses
+   [request_triple] to send [ASKING + CACHING YES + read] as
+   three wire-adjacent frames on the new owner; the ASKING
+   reply is hidden so the caller still sees the pair shape. *)
 let make_pair ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
     ?(sync_ref = ignore) ?timeout
     (target : Router.Target.t)
@@ -309,9 +310,37 @@ let make_pair ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
                        result
                    | Some conn ->
                        loop (attempt + 1) (send_on conn)))
-         | Some { kind = Redirect.Ask; _ } ->
-             (* See header comment — ASK retry needs 3 frames. *)
-             result
+         | Some { kind = Redirect.Ask; host; port; _ } ->
+             (* ASK retry: send [ASKING + CACHING YES + read] as
+                three wire-adjacent frames on the new owner.
+                ASKING primes the slot's per-key migration flag;
+                CACHING YES then arms tracking for the read. We
+                hide the ASKING reply (must be +OK) and return
+                only the CACHING + read replies, so the caller
+                still sees the pair shape. *)
+             (match
+                Topology.find_node_by_address !topology_ref ~host ~port
+              with
+              | None -> trigger_refresh (); result
+              | Some node ->
+                  (match Node_pool.get pool node.id with
+                   | None -> trigger_refresh (); result
+                   | Some conn ->
+                       let triple =
+                         Connection.request_triple ?timeout conn
+                           [| "ASKING" |] args1 args2
+                       in
+                       (match triple with
+                        | Error e -> Error e
+                        | Ok (Error e, _, _) -> Error e
+                        | Ok (Ok (Resp3.Simple_string "OK"), caching, read) ->
+                            Ok (caching, read)
+                        | Ok (Ok unexpected, _, _) ->
+                            Error
+                              (Connection.Error.Protocol_violation
+                                 (Format.asprintf
+                                    "ASKING: unexpected reply %a"
+                                    Resp3.pp unexpected)))))
          | None ->
              (match ve.code with
               | "CLUSTERDOWN" ->

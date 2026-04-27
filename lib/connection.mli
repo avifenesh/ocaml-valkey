@@ -97,14 +97,13 @@ val request_pair :
   string array ->
   ( (Resp3.t, Error.t) result * (Resp3.t, Error.t) result
   , Error.t) result
-(** Pipelined two-frame submit. Both wires are concatenated
-    and enqueued as a single indivisible unit, so no other
-    fiber's command can appear between them on the wire.
-    Internal: used by the OPTIN client-side-caching read path
-    (where the spec requires [CLIENT CACHING YES] to be sent
-    immediately before the tracked read). Not intended for
-    general use — the matching-FIFO contract assumes exactly
-    two replies arrive in order.
+(** Pipelined two-frame submit through the matching FIFO. Wires
+    are enqueued as a single indivisible unit and flushed
+    back-to-back via scatter-gather, so no other fiber's command
+    can land between them on the wire. Internal: used by the
+    OPTIN client-side-caching read path (where the spec
+    requires [CLIENT CACHING YES] to be sent immediately before
+    the tracked read).
 
     The outer [Error.t] covers failures that prevented the
     submit (Closed, Circuit_open, Queue_full). The inner pair
@@ -113,6 +112,25 @@ val request_pair :
 
     [timeout] applies as a single wall-clock deadline to the
     whole pair. *)
+
+val request_triple :
+  ?timeout:float ->
+  t ->
+  string array ->
+  string array ->
+  string array ->
+  ( (Resp3.t, Error.t) result
+    * (Resp3.t, Error.t) result
+    * (Resp3.t, Error.t) result
+  , Error.t) result
+(** Pipelined three-frame variant of {!request_pair}. Internal:
+    used to recover OPTIN reads from an ASK redirect, where the
+    server-side migration window requires
+    [ASKING + CLIENT CACHING YES + <read>] as three
+    wire-adjacent frames. ASK consumes the slot's in-progress
+    flag for the immediately-next command, [CACHING YES] then
+    arms tracking, and the read carries the actual key. Same
+    error semantics as {!request_pair}. *)
 
 val send_fire_and_forget :
   t ->
