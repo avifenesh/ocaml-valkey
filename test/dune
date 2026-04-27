@@ -16,8 +16,9 @@
           test_command_spec
           test_cache
           test_invalidation
-          test_inflight)
- (libraries valkey alcotest))
+          test_inflight
+          test_csc_optin_unit)
+ (libraries valkey alcotest eio_main))
 
 ; Integration tests — need a live Valkey / cluster. Built as a
 ; plain executable so [@runtest] does not invoke them in the opam
@@ -47,6 +48,7 @@
           test_csc_lifecycle
           test_csc_bcast
           test_csc_optin
+          test_csc_optin_unit
           test_resp3
           test_resp3_roundtrip
           test_retry_state

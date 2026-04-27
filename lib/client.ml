@@ -119,6 +119,27 @@ let exec ?timeout ?target ?read_from t args =
               who want true fan-out should use [exec_multi]. *)
            Router.exec ?timeout t.router Target.Random user_rf args)
 
+(* Pure mapping from a [Connection.request_pair] result for the
+   OPTIN [CACHING YES + read] submit to the read's effective
+   reply. Exposed via [For_testing] so every arm can be exercised
+   by pure-unit tests — the [Protocol_violation] and
+   frame-1-transport-error arms are otherwise unreachable against
+   a real server. *)
+let map_optin_pair_reply :
+    ((Resp3.t, Connection.Error.t) result
+     * (Resp3.t, Connection.Error.t) result,
+     Connection.Error.t) result ->
+    (Resp3.t, Connection.Error.t) result = function
+  | Error e -> Error e
+  | Ok (Error e, _) -> Error e
+  | Ok (Ok (Resp3.Simple_string "OK"), second) -> second
+  | Ok (Ok other, _) ->
+      Error
+        (Connection.Error.Protocol_violation
+           (Format.asprintf
+              "CLIENT CACHING YES: unexpected reply %a"
+              Resp3.pp other))
+
 (* OPTIN-armed read: pipeline [CLIENT CACHING YES] + [args] as one
    wire-atomic submit on the standalone primary connection. The
    from_router / connect gate guarantees standalone here, so we
@@ -129,19 +150,9 @@ let exec_optin_pair ?timeout t args =
   match Router.primary_connection t.router with
   | None -> Error Connection.Error.Closed
   | Some conn ->
-      (match
-         Connection.request_pair ?timeout conn
-           [| "CLIENT"; "CACHING"; "YES" |] args
-       with
-       | Error e -> Error e
-       | Ok (Error e, _) -> Error e
-       | Ok (Ok (Resp3.Simple_string "OK"), second) -> second
-       | Ok (Ok other, _) ->
-           Error
-             (Connection.Error.Protocol_violation
-                (Format.asprintf
-                   "CLIENT CACHING YES: unexpected reply %a"
-                   Resp3.pp other)))
+      map_optin_pair_reply
+        (Connection.request_pair ?timeout conn
+           [| "CLIENT"; "CACHING"; "YES" |] args)
 
 let exec_multi ?timeout ?fan t args =
   let fan =
@@ -2989,3 +3000,7 @@ let memory_usage ?timeout ?read_from ?samples t key =
 let memory_purge ?timeout t =
   expect_ok "MEMORY PURGE"
     (exec ?timeout t [| "MEMORY"; "PURGE" |])
+
+module For_testing = struct
+  let map_optin_pair_reply = map_optin_pair_reply
+end

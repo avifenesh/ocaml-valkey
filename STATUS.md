@@ -119,7 +119,7 @@ full step-by-step.
 
 Two targets, both green at the current commit:
 
-### Pure-unit — `dune build @runtest` — **141 tests**
+### Pure-unit — `dune build @runtest` — **148 tests**
 
 Opam-CI clean. No server dependency. Runs in ~5s.
 
@@ -135,6 +135,7 @@ Opam-CI clean. No server dependency. Runs in ~5s.
 | `cache` | 22 | LRU/byte budget/TTL/metrics |
 | `invalidation parser` | 16 | RESP3 push → `Invalidation.t`; `apply` |
 | `inflight` | 12 | Single-flight + dirty-flip |
+| `csc optin (pure)` | 7 | `map_optin_pair_reply` (4 arms incl. `Protocol_violation`); cluster-OPTIN gate at `from_router` (Optin raises, Default/Bcast don't) |
 
 ### Integration — `dune exec test/run_tests.exe` — **full suite** against live servers
 
@@ -142,7 +143,7 @@ Requires `docker compose up -d` (standalone at `:6379`) and optionally
 `docker compose -f docker-compose.cluster.yml up -d` plus
 `bash scripts/cluster-hosts-setup.sh` (cluster at `:7000..:7005`).
 
-CSC-specific slice (30 tests, all green at the current commit):
+CSC-specific slice (32 tests, all green at the current commit):
 
 | File | Count | Scope |
 |------|------:|-------|
@@ -153,13 +154,14 @@ CSC-specific slice (30 tests, all green at the current commit):
 | `test_csc_cluster.ml` | 2 | Two-shard invalidation; cluster-wide `FLUSHDB` |
 | `test_csc_lifecycle.ml` | 3 | Standalone reconnect flush; live `CLUSTER FAILOVER FORCE`; TTL expiry without invalidation |
 | `test_csc_bcast.ml` | 3 | `TRACKINGINFO` flags; in-prefix evict; out-of-prefix isolation |
-| `test_csc_optin.ml` | 4 | Populate-then-hit; external SET evicts; 50-fiber concurrent OPTIN tracking; CACHING-error path |
+| `test_csc_optin.ml` | 6 | Populate-then-hit; external SET evicts; 50-fiber concurrent OPTIN tracking; CACHING-error path; read after `Client.close` returns `Closed`; tiny `max_queued_bytes` returns `Queue_full` |
 
 The 26 CSC tests pre-OPTIN are run against live Valkey 9.0.3
 standalone **and** a live 6-node cluster with real primary
-promotion. The 4 new `test_csc_optin.ml` cases are standalone-only
+promotion. The 6 `test_csc_optin.ml` cases are standalone-only
 because cluster + OPTIN is gated until pair-aware redirect retry
-lands. Nothing skipped in standalone.
+lands; the cluster gate itself is covered by the pure-unit
+`csc optin (pure)` suite. Nothing skipped in standalone.
 
 ---
 

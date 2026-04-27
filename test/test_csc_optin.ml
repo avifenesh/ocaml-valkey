@@ -196,4 +196,53 @@ let tests =
       test_concurrent_optin_tracking;
     Alcotest.test_case "OPTIN CACHING-error path surfaces cleanly" `Quick
       test_caching_yes_error_surfaces_cleanly;
+    Alcotest.test_case "OPTIN read after close surfaces Closed" `Quick
+      (fun () ->
+        let k = "ocaml:csc:optin:closed" in
+        with_optin_csc ~keys:[k] @@ fun _env client _cache aux ->
+        let _ = C.exec aux [| "SET"; k; "v" |] in
+        C.close client;
+        match C.get client k with
+        | Error E.Closed -> ()
+        | other ->
+            Alcotest.failf
+              "OPTIN GET after Client.close should be Closed, got %s"
+              (match other with
+               | Ok None -> "Ok None"
+               | Ok (Some s) -> Printf.sprintf "Ok (Some %S)" s
+               | Error e -> Format.asprintf "Error %a" E.pp e));
+    Alcotest.test_case "OPTIN with tiny max_queued_bytes surfaces Queue_full" `Quick
+      (fun () ->
+        Eio_main.run @@ fun env ->
+        Eio.Switch.run @@ fun sw ->
+        let net = Eio.Stdenv.net env in
+        let clock = Eio.Stdenv.clock env in
+        let cache = Cache.create ~byte_budget:(1024 * 1024) in
+        let ccfg = CC.make ~cache ~mode:CC.Optin () in
+        (* CLIENT CACHING YES (~28 bytes) + GET k (~14 bytes) is
+           comfortably more than 16 bytes. Setting the per-submit
+           cap below the pair size forces request_pair to refuse. *)
+        let conn_cfg =
+          { Valkey.Connection.Config.default with
+            max_queued_bytes = 16;
+            client_cache = Some ccfg }
+        in
+        let cfg : Cfg.t = { Cfg.default with connection = conn_cfg } in
+        let client = C.connect ~sw ~net ~clock ~config:cfg ~host ~port () in
+        let aux = C.connect ~sw ~net ~clock ~host ~port () in
+        let k = "ocaml:csc:optin:qfull" in
+        let cleanup () = let _ = C.del aux [k] in () in
+        cleanup ();
+        let _ = C.exec aux [| "SET"; k; "v" |] in
+        let result = C.get client k in
+        cleanup (); C.close client; C.close aux;
+        match result with
+        | Error E.Queue_full -> ()
+        | other ->
+            Alcotest.failf
+              "OPTIN GET with tiny max_queued_bytes should be Queue_full, got %s"
+              (match other with
+               | Ok None -> "Ok None"
+               | Ok (Some s) -> Printf.sprintf "Ok (Some %S)" s
+               | Error e -> Format.asprintf "Error %a" E.pp e));
   ]

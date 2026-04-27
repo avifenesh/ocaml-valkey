@@ -1606,3 +1606,20 @@ val memory_purge :
   ?timeout:float -> t -> (unit, Connection.Error.t) result
 (** [MEMORY PURGE]. Asks the allocator to release dirty pages.
     No-op on non-jemalloc builds. *)
+
+
+(** {1 Internals exposed for testing} *)
+
+module For_testing : sig
+  val map_optin_pair_reply :
+    ((Resp3.t, Connection.Error.t) result
+     * (Resp3.t, Connection.Error.t) result,
+     Connection.Error.t) result ->
+    (Resp3.t, Connection.Error.t) result
+  (** Pure mapping from a {!Connection.request_pair} result to
+      the OPTIN read's effective reply. Lifted out of
+      [exec_optin_pair] so every arm — including the
+      [Protocol_violation] case (server replies non-OK to
+      [CLIENT CACHING YES]) and the frame-1 transport-error case
+      — is covered by pure unit tests. *)
+end
