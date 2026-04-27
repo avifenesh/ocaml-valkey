@@ -19,8 +19,7 @@ let port = 6379
    generous on loopback and stable on CI. *)
 let grace_s = 0.05
 
-let sleep_ms env ms =
-  Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
+let sleep_ms = Test_support.sleep_ms
 
 (* Cache-enabled client [client] + bare aux client [aux] for
    "other-actor" writes. [keys] are cleaned before the body runs

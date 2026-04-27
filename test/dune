@@ -26,6 +26,7 @@
 (executable
  (name run_tests)
  (modules run_tests
+          test_support
           test_connection
           test_client
           test_sorted_set

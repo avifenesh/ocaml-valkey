@@ -21,8 +21,7 @@ let port = 6379
 
 let grace_s = 0.05
 
-let sleep_ms env ms =
-  Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
+let sleep_ms = Test_support.sleep_ms
 
 (* Poll [check] until it returns true or [deadline_s] elapses.
    Returns the final value of [check]. Used in concurrency tests

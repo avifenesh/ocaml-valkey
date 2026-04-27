@@ -16,8 +16,7 @@ module R = Valkey.Resp3
 let host = "localhost"
 let port = 6379
 
-let sleep_ms env ms =
-  Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
+let sleep_ms = Test_support.sleep_ms
 
 (* Open a cache-enabled client + a bare aux client, run the body,
    close both. *)

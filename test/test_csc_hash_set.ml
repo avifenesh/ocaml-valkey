@@ -13,8 +13,7 @@ let host = "localhost"
 let port = 6379
 let grace_s = 0.05
 
-let sleep_ms env ms =
-  Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
+let sleep_ms = Test_support.sleep_ms
 
 let with_csc ~keys f =
   Eio_main.run @@ fun env ->

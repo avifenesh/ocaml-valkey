@@ -22,8 +22,7 @@ module E = Valkey.Connection.Error
 let host = "localhost"
 let port = 6379
 
-let sleep_ms env ms =
-  Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
+let sleep_ms = Test_support.sleep_ms
 
 (* --- Standalone: reconnect flushes the cache ------------------- *)
 
@@ -93,27 +92,9 @@ let test_standalone_reconnect_flushes_cache () =
    assert the cache cleared, but allow either the topology-
    refresh path or the reconnect path to have done it. *)
 
-let seeds = [ "valkey-c1", 7000; "valkey-c2", 7001; "valkey-c3", 7002 ]
-
-let force_skip () =
-  try Sys.getenv "VALKEY_CLUSTER" = "skip" with Not_found -> false
-
-let cluster_reachable () =
-  if force_skip () then false
-  else
-    try
-      Eio_main.run @@ fun env ->
-      Eio.Switch.run @@ fun sw ->
-      let net = Eio.Stdenv.net env in
-      let clock = Eio.Stdenv.clock env in
-      let (host, port) = List.hd seeds in
-      let conn =
-        Conn.connect ~sw ~net ~clock
-          ~config:Conn.Config.default ~host ~port ()
-      in
-      Conn.close conn;
-      true
-    with _ -> false
+let seeds = Test_support.seeds
+let force_skip = Test_support.force_skip
+let cluster_reachable = Test_support.cluster_reachable
 
 (* Block until the cluster is fully bootstrapped. "Reachable" (a
    single seed accepts a TCP connection) doesn't imply ready —
@@ -181,121 +162,16 @@ let wait_cluster_ready env =
   in
   wait ()
 
-let skipped name =
-  Printf.printf "    [SKIP] %s (cluster not reachable)\n" name
-
-(* Parsing helpers for CLUSTER NODES output.
-   Each line: <id> <host:port@bus[,hostname]> <flags>
-              <master-id-or--> <ping> <pong> <epoch> <link> [<slot-range> ...]
-   Replica lines have flags containing "slave" / "replica" and a
-   non-"-" master-id field. Slot ranges (e.g. "0-5460") only
-   appear on master lines. *)
-
-let parse_addr addr_field =
-  (* "host:port@bus[,hostname]" -> (host, port) using the first
-     comma-separated chunk only (the announced address). *)
-  let primary_chunk = List.hd (String.split_on_char ',' addr_field) in
-  match String.index_opt primary_chunk ':' with
-  | None -> None
-  | Some i ->
-      let host = String.sub primary_chunk 0 i in
-      let rest =
-        String.sub primary_chunk (i + 1) (String.length primary_chunk - i - 1)
-      in
-      let port =
-        let at = try String.index rest '@' with Not_found -> String.length rest in
-        int_of_string (String.sub rest 0 at)
-      in
-      Some (host, port)
-
-let line_is_replica flags =
-  List.exists (fun f -> f = "slave" || f = "replica")
-    (String.split_on_char ',' flags)
-
-let line_owns_slot fields slot =
-  (* Master lines list slot ranges as the trailing fields, e.g.
-     "0-5460" or "12345" (single). Skip first 8 fixed fields then
-     scan. *)
-  match fields with
-  | _id :: _addr :: _flags :: _master :: _ping :: _pong :: _epoch :: _link
-    :: ranges ->
-      List.exists
-        (fun r ->
-          match String.split_on_char '-' r with
-          | [ a ] ->
-              (try int_of_string a = slot with _ -> false)
-          | [ a; b ] ->
-              (try
-                 let lo = int_of_string a and hi = int_of_string b in
-                 lo <= slot && slot <= hi
-               with _ -> false)
-          | _ -> false)
-        ranges
-  | _ -> false
-
-let cluster_nodes_text env =
-  Eio.Switch.run @@ fun sw ->
-  let net = Eio.Stdenv.net env in
-  let clock = Eio.Stdenv.clock env in
-  let h, p = List.hd seeds in
-  let conn = Conn.connect ~sw ~net ~clock ~host:h ~port:p () in
-  let r = Conn.request conn [| "CLUSTER"; "NODES" |] in
-  Conn.close conn;
-  match r with
-  | Ok (R.Bulk_string s | R.Simple_string s
-        | R.Verbatim_string { data = s; _ }) -> s
-  | Ok v -> Alcotest.failf "CLUSTER NODES unexpected: %a" R.pp v
-  | Error e -> Alcotest.failf "CLUSTER NODES: %a" E.pp e
+let skipped = Test_support.skipped
 
 (* Trigger a topology change by forcing a failover on the shard
-   that owns [slot]. Picks the first replica of that slot's
-   primary and sends CLUSTER FAILOVER FORCE to it. Returns once
-   the cluster has accepted the promotion; gossip + topology
-   refresh on the test client are async, so the caller still
-   needs a poll loop / sleep before assertions.
-   Targeting a SPECIFIC shard (rather than "any first replica")
-   is what makes the post-failover MOVED probe deterministic —
-   otherwise force_failover may hit a shard that owns neither
-   test key and the probes never see MOVED. *)
+   that owns [slot]. Targets a specific shard (not "any first
+   replica") so the post-failover MOVED probe is deterministic. *)
 let force_failover_for_slot env ~slot =
-  let nodes = cluster_nodes_text env in
-  let lines =
-    List.filter (fun l -> String.length l > 0)
-      (String.split_on_char '\n' nodes)
-  in
-  let parsed =
-    List.map (fun l -> l, String.split_on_char ' ' l) lines
-  in
-  let owner_id =
-    List.find_map
-      (fun (_l, fields) ->
-        match fields with
-        | id :: _addr :: flags :: _ when not (line_is_replica flags)
-                                          && line_owns_slot fields slot ->
-            Some id
-        | _ -> None)
-      parsed
-  in
-  let owner_id =
-    match owner_id with
-    | Some id -> id
-    | None -> Alcotest.failf "no master owns slot %d" slot
-  in
-  let replica_ep =
-    List.find_map
-      (fun (_l, fields) ->
-        match fields with
-        | _id :: addr :: flags :: master :: _
-          when line_is_replica flags && master = owner_id ->
-            parse_addr addr
-        | _ -> None)
-      parsed
-  in
-  match replica_ep with
+  match Test_support.Cluster_nodes.replica_of_slot_owner env ~slot with
   | None ->
       Alcotest.failf
-        "no replica found for shard owning slot %d (master id %s)"
-        slot owner_id
+        "no replica found for shard owning slot %d" slot
   | Some (host, port) ->
       Eio.Switch.run @@ fun sw ->
       let net = Eio.Stdenv.net env in

@@ -12,29 +12,9 @@ module C = Valkey.Client
 module CR = Valkey.Cluster_router
 module Conn = Valkey.Connection
 
-let seeds = [ "valkey-c1", 7000; "valkey-c2", 7001; "valkey-c3", 7002 ]
-
-let force_skip () =
-  try Sys.getenv "VALKEY_CLUSTER" = "skip" with Not_found -> false
-
-(* Try a single transient Connection to the first seed. True =
-   reachable, false = the cluster isn't up / not configured. *)
-let cluster_reachable () =
-  if force_skip () then false
-  else
-    try
-      Eio_main.run @@ fun env ->
-      Eio.Switch.run @@ fun sw ->
-      let net = Eio.Stdenv.net env in
-      let clock = Eio.Stdenv.clock env in
-      let (host, port) = List.hd seeds in
-      let conn =
-        Conn.connect ~sw ~net ~clock
-          ~config:Conn.Config.default ~host ~port ()
-      in
-      Conn.close conn;
-      true
-    with _ -> false
+let seeds = Test_support.seeds
+let force_skip = Test_support.force_skip
+let cluster_reachable = Test_support.cluster_reachable
 
 let with_cluster_client f =
   Eio_main.run @@ fun env ->

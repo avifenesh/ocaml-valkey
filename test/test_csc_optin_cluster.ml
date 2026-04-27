@@ -18,34 +18,13 @@ module Conn = Valkey.Connection
 module E = Valkey.Connection.Error
 module R = Valkey.Resp3
 
-let seeds = [ "valkey-c1", 7000; "valkey-c2", 7001; "valkey-c3", 7002 ]
+let seeds = Test_support.seeds
 let grace_s = 0.05
 
-let force_skip () =
-  try Sys.getenv "VALKEY_CLUSTER" = "skip" with Not_found -> false
-
-let cluster_reachable () =
-  if force_skip () then false
-  else
-    try
-      Eio_main.run @@ fun env ->
-      Eio.Switch.run @@ fun sw ->
-      let net = Eio.Stdenv.net env in
-      let clock = Eio.Stdenv.clock env in
-      let h, p = List.hd seeds in
-      let conn =
-        Conn.connect ~sw ~net ~clock ~config:Conn.Config.default
-          ~host:h ~port:p ()
-      in
-      Conn.close conn;
-      true
-    with _ -> false
-
-let skipped name =
-  Printf.printf "    [SKIP] %s (cluster not reachable)\n" name
-
-let sleep_ms env ms =
-  Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
+let force_skip = Test_support.force_skip
+let cluster_reachable = Test_support.cluster_reachable
+let skipped = Test_support.skipped
+let sleep_ms = Test_support.sleep_ms
 
 let with_optin_cluster ~keys f =
   Eio_main.run @@ fun env ->
@@ -177,74 +156,11 @@ let test_concurrent_optin_cluster () =
          invalidated within 3s; %d still cached"
         n (Cache.count cache)
 
-(* Helpers to discover a primary that does NOT own a given slot,
-   so we can elicit MOVED on purpose without orchestrating real
-   failover (which leaves cleanup-time refresh state pending and
-   hangs the switch). *)
+(* CLUSTER NODES helpers come from [Test_support.Cluster_nodes]. *)
+module CN = Test_support.Cluster_nodes
 
-let cluster_nodes_text env =
-  Eio.Switch.run @@ fun sw ->
-  let net = Eio.Stdenv.net env in
-  let clock = Eio.Stdenv.clock env in
-  let h, p = List.hd seeds in
-  let conn =
-    Conn.connect ~sw ~net ~clock ~config:Conn.Config.default
-      ~host:h ~port:p ()
-  in
-  let r = Conn.request conn [| "CLUSTER"; "NODES" |] in
-  Conn.close conn;
-  match r with
-  | Ok (R.Bulk_string s | R.Simple_string s
-        | R.Verbatim_string { data = s; _ }) -> s
-  | _ -> Alcotest.fail "CLUSTER NODES failed"
-
-let parse_nodes nodes_text =
-  String.split_on_char '\n' nodes_text
-  |> List.filter (fun l -> String.length l > 0)
-  |> List.map (fun l -> String.split_on_char ' ' l)
-
-let line_owns_slot fields slot =
-  match fields with
-  | _id :: _addr :: _flags :: _master :: _ping :: _pong :: _epoch :: _link
-    :: ranges ->
-      List.exists
-        (fun r ->
-          match String.split_on_char '-' r with
-          | [ a ] -> (try int_of_string a = slot with _ -> false)
-          | [ a; b ] ->
-              (try
-                 let lo = int_of_string a and hi = int_of_string b in
-                 lo <= slot && slot <= hi
-               with _ -> false)
-          | _ -> false)
-        ranges
-  | _ -> false
-
-let line_is_master flags =
-  List.exists (fun f -> f = "master")
-    (String.split_on_char ',' flags)
-
-let primary_owning_slot env ~slot =
-  let parsed = parse_nodes (cluster_nodes_text env) in
-  List.find_map
-    (fun fields ->
-      match fields with
-      | id :: _addr :: flags :: _ ->
-          if line_is_master flags && line_owns_slot fields slot
-          then Some id else None
-      | _ -> None)
-    parsed
-
-let other_primary env ~not_id =
-  let parsed = parse_nodes (cluster_nodes_text env) in
-  List.find_map
-    (fun fields ->
-      match fields with
-      | id :: _addr :: flags :: _ ->
-          if line_is_master flags && id <> not_id
-          then Some id else None
-      | _ -> None)
-    parsed
+let primary_owning_slot = CN.primary_owning_slot
+let other_primary = CN.other_primary
 
 (* Synthetic-MOVED OPTIN test: routes an OPTIN read at a primary
    that doesn't own the key's slot. The wrong primary returns

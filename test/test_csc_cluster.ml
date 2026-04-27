@@ -24,38 +24,12 @@ module CR = Valkey.Cluster_router
 module R = Valkey.Resp3
 module E = Valkey.Connection.Error
 
-let seeds = [ "valkey-c1", 7000; "valkey-c2", 7001; "valkey-c3", 7002 ]
-
-let force_skip () =
-  try Sys.getenv "VALKEY_CLUSTER" = "skip" with Not_found -> false
-
-(* Probe a seed with a plain Connection; if it can't connect,
-   skip all cluster tests gracefully. *)
-let cluster_reachable () =
-  if force_skip () then false
-  else
-    try
-      Eio_main.run @@ fun env ->
-      Eio.Switch.run @@ fun sw ->
-      let net = Eio.Stdenv.net env in
-      let clock = Eio.Stdenv.clock env in
-      let (host, port) = List.hd seeds in
-      let conn =
-        Conn.connect ~sw ~net ~clock
-          ~config:Conn.Config.default ~host ~port ()
-      in
-      Conn.close conn;
-      true
-    with _ -> false
-
-let skipped name =
-  Printf.printf "    [SKIP] %s (cluster not reachable; set \
-                             /etc/hosts via \
-                             scripts/cluster-hosts-setup.sh)\n" name
-
+let seeds = Test_support.seeds
+let force_skip = Test_support.force_skip
+let cluster_reachable = Test_support.cluster_reachable
+let skipped = Test_support.skipped
+let sleep_ms = Test_support.sleep_ms
 let grace_s = 0.05
-let sleep_ms env ms =
-  Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
 
 (* Open a cluster Client with CSC enabled + a plain aux client
    on the same seeds for external writes. *)

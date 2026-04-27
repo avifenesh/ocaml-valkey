@@ -18,8 +18,7 @@ module E = Valkey.Connection.Error
 let host = "localhost"
 let port = 6379
 
-let sleep_ms env ms =
-  Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
+let sleep_ms = Test_support.sleep_ms
 
 (* Build a BCAST-mode Client_cache.t with one or more prefixes. *)
 let bcast_ccfg ~cache ~prefixes =
