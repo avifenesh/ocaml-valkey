@@ -42,6 +42,21 @@ type exec_multi_fn =
   ?timeout:float -> Fan_target.t -> string array ->
   (string * (Resp3.t, Connection.Error.t) result) list
 
+type pair_fn =
+  ?timeout:float -> Target.t -> Read_from.t ->
+  string array -> string array ->
+  ( (Resp3.t, Connection.Error.t) result
+    * (Resp3.t, Connection.Error.t) result
+  , Connection.Error.t) result
+(** Pipelined two-frame submit through the routing layer. Frame 1
+    is the arming command (e.g. [CLIENT CACHING YES] for OPTIN
+    CSC); frame 2 is the keyed read. Both frames go to the same
+    connection in one indivisible enqueue ({!Connection.request_pair}).
+    On cluster mode, MOVED on the read frame triggers the same
+    redirect-aware retry as {!exec_fn} — the whole pair is
+    re-submitted on the new owner so frame 1 stays adjacent to
+    frame 2. *)
+
 type connection_for_slot_fn =
   int -> Connection.t option
 (** Resolve the live [Connection.t] for the primary that owns the
@@ -61,6 +76,7 @@ type endpoint_for_slot_fn =
 val make :
   exec:exec_fn ->
   exec_multi:exec_multi_fn ->
+  pair:pair_fn ->
   close:(unit -> unit) ->
   primary:(unit -> Connection.t option) ->
   connection_for_slot:connection_for_slot_fn ->
@@ -78,6 +94,13 @@ val exec :
 val exec_multi :
   ?timeout:float -> t -> Fan_target.t -> string array ->
   (string * (Resp3.t, Connection.Error.t) result) list
+
+val pair :
+  ?timeout:float -> t -> Target.t -> Read_from.t ->
+  string array -> string array ->
+  ( (Resp3.t, Connection.Error.t) result
+    * (Resp3.t, Connection.Error.t) result
+  , Connection.Error.t) result
 (** Send [args] to every node in the fan-out set in parallel.
     Returns one [(node_id, result)] pair per node, in unspecified order.
 

@@ -110,11 +110,13 @@ Behavioural summary, honest:
   `EXISTS` / `STRLEN` / `TYPE` (low value; covered by the GET-shaped
   entry for the same key in practice).
 - **`mode = Default`** is the default and recommended mode for
-  standalone and cluster. **`mode = Optin`** is supported for
-  standalone (cluster + OPTIN with redirect-aware pair retry is
-  a separate step); the read path pipelines `CLIENT CACHING
-  YES + read` as one wire-atomic submit via the new internal
-  `Connection.request_pair`. The previous `optin : bool` field
+  standalone and cluster. **`mode = Optin`** is supported on
+  both standalone and cluster — the read path pipelines `CLIENT
+  CACHING YES + read` as one wire-atomic submit via the new
+  internal `Connection.request_pair`, threaded through
+  `Router.pair` so the cluster path retries the whole pair on
+  the new owner if MOVED arrives on the read frame (frame 1
+  stays adjacent to frame 2). The previous `optin : bool` field
   is folded into the `mode` variant so OPTIN/BCAST mutual
   exclusion is encoded in the type.
 - Per-shard tracking on cluster happens automatically via the single
@@ -139,7 +141,7 @@ full step-by-step.
 
 Two targets, both green at the current commit:
 
-### Pure-unit — `dune build @runtest` — **146 tests**
+### Pure-unit — `dune build @runtest` — **143 tests**
 
 Opam-CI clean. No server dependency. Runs in ~5s.
 
@@ -155,7 +157,7 @@ Opam-CI clean. No server dependency. Runs in ~5s.
 | `cache` | 22 | LRU/byte budget/TTL/metrics |
 | `invalidation parser` | 16 | RESP3 push → `Invalidation.t`; `apply` |
 | `inflight` | 12 | Single-flight + dirty-flip |
-| `csc optin (pure)` | 7 | `map_optin_pair_reply` (4 arms incl. `Protocol_violation`); cluster-OPTIN gate at `from_router` (Optin raises, Default/Bcast don't) |
+| `csc optin (pure)` | 4 | `map_optin_pair_reply` arms (outer Error, frame-1 transport error, happy path, non-OK CACHING reply -> Protocol_violation) |
 
 ### Integration — `dune exec test/run_tests.exe` — **full suite** against live servers
 
@@ -174,14 +176,14 @@ CSC-specific slice (32 tests, all green at the current commit):
 | `test_csc_cluster.ml` | 2 | Two-shard invalidation; cluster-wide `FLUSHDB` |
 | `test_csc_lifecycle.ml` | 3 | Standalone reconnect flush; live `CLUSTER FAILOVER FORCE`; TTL expiry without invalidation |
 | `test_csc_bcast.ml` | 3 | `TRACKINGINFO` flags; in-prefix evict; out-of-prefix isolation |
-| `test_csc_optin.ml` | 6 | Populate-then-hit; external SET evicts; 50-fiber concurrent OPTIN tracking; CACHING-error path; read after `Client.close` returns `Closed`; tiny `max_queued_bytes` returns `Queue_full` |
+| `test_csc_optin.ml` | 6 | Populate-then-hit; external SET evicts; 50-fiber concurrent OPTIN tracking; CACHING-error path; read after `Client.close` returns transport error; tiny `max_queued_bytes` returns `Queue_full` |
+| `test_csc_optin_cluster.ml` | 2 | Two-shard populate + cross-shard evict; 25-fiber concurrent OPTIN across all 3 shards |
 
-The 26 CSC tests pre-OPTIN are run against live Valkey 9.0.3
-standalone **and** a live 6-node cluster with real primary
-promotion. The 6 `test_csc_optin.ml` cases are standalone-only
-because cluster + OPTIN is gated until pair-aware redirect retry
-lands; the cluster gate itself is covered by the pure-unit
-`csc optin (pure)` suite. Nothing skipped in standalone.
+CSC tests run against live Valkey 9.0.3 standalone **and** a
+live 6-node cluster with real primary promotion. OPTIN cluster
+support travels through `Router.pair`, with MOVED on the read
+frame triggering a redirect-aware retry of the whole pair.
+Nothing skipped.
 
 ---
 
@@ -223,16 +225,12 @@ First-run sanity steps on Ubuntu:
 
 These are documented here rather than as stub code or dead TODOs:
 
-1. **Cluster + OPTIN with redirect-aware pair retry.** OPTIN is
-   wired for standalone via `Connection.request_pair`. In cluster
-   mode, a slot-migration MOVED/ASK on the read frame would today
-   surface as a `Server_error` to the user instead of being
-   transparently retried (as `exec` does for non-OPTIN reads).
-   `Client.from_router` raises `Invalid_argument` for `mode =
-   Optin` on a non-standalone router until this is wired. Plumbing
-   shape is a `dispatch_pair` closure on `Router.t` mirroring
-   `exec`'s closure, with the existing `handle_retries` adapted
-   to retry the whole pair on the new connection.
+1. **OPTIN ASK redirect retry.** Cluster + OPTIN handles MOVED
+   transparently via `Router.pair`. ASK is rare and currently
+   surfaces as `Server_error` to the caller — handling it
+   correctly needs a 3-frame submit (`ASKING + CACHING YES +
+   read`) since `request_pair` is two-frame; would generalize to
+   a `request_n` primitive or a special-case ASKING-aware pair.
 2. **Per-key TTL refresh on hit.** Right now a cached entry's TTL
    counts from its last `put`, not its last `get`. Some users expect
    sliding-window TTL; we don't do that. If wanted: add an
@@ -286,9 +284,8 @@ implementing.
 
 - [ ] **OTel bridge for `cache_metrics`.** Meter + exporter callback.
       ~30 LOC + a docs note.
-- [ ] **Cluster + OPTIN with redirect-aware pair retry.** Standalone
-      OPTIN is shipped (B2.5); cluster gate raises until the pair is
-      wired into `handle_retries`.
+- [ ] **OPTIN ASK redirect retry.** MOVED is handled transparently;
+      ASK currently surfaces. Needs a 3-frame submit primitive.
 - [ ] **Slot-migration stress test.** When there's a real incident
       report to defend against.
 
@@ -304,7 +301,7 @@ implementing.
 - CSC all commands: `6b19f1a`.
 - CSC cluster + lifecycle: `3ae246d` and `664187e`.
 - CSC BCAST landed: `595b84a`.
-- CSC OPTIN landed: `80563ec` (B2.5; standalone only, cluster gated).
+- CSC OPTIN landed: `80563ec` (B2.5 standalone) and (this commit) (B2.5 cluster).
 
 Use `git log --grep='Phase 8'` or `git log --grep='csc:'` to walk the
 series.

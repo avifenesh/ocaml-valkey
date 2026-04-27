@@ -196,17 +196,25 @@ let tests =
       test_concurrent_optin_tracking;
     Alcotest.test_case "OPTIN CACHING-error path surfaces cleanly" `Quick
       test_caching_yes_error_surfaces_cleanly;
-    Alcotest.test_case "OPTIN read after close surfaces Closed" `Quick
+    Alcotest.test_case
+      "OPTIN read after close surfaces a transport error" `Quick
       (fun () ->
         let k = "ocaml:csc:optin:closed" in
         with_optin_csc ~keys:[k] @@ fun _env client _cache aux ->
         let _ = C.exec aux [| "SET"; k; "v" |] in
         C.close client;
+        (* The exact error variant depends on the routing layer:
+           [Closed] when the per-connection writer queue is dead,
+           [Terminal "...no live connections..."] when the router
+           has been torn down. Either is acceptable; the contract
+           is "post-close reads do not return Ok and do not hang." *)
         match C.get client k with
         | Error E.Closed -> ()
+        | Error (E.Terminal _) -> ()
         | other ->
             Alcotest.failf
-              "OPTIN GET after Client.close should be Closed, got %s"
+              "OPTIN GET after Client.close should be a transport \
+               error, got %s"
               (match other with
                | Ok None -> "Ok None"
                | Ok (Some s) -> Printf.sprintf "Ok (Some %S)" s

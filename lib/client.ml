@@ -67,14 +67,6 @@ let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port (
 
 let from_router ~config router =
   let conn_cfg = resolve_connection_config config in
-  (match conn_cfg.Connection.Config.client_cache with
-   | Some cc when cc.Client_cache.mode = Client_cache.Optin
-              && not (Router.is_standalone router) ->
-       invalid_arg
-         "Client.from_router: client_cache mode=Optin is only \
-          supported on standalone routers in this release; \
-          cluster + OPTIN is planned but not yet wired."
-   | _ -> ());
   { router; config;
     client_cache = conn_cfg.Connection.Config.client_cache;
     loaded_shas = Hashtbl.create 16;
@@ -140,19 +132,25 @@ let map_optin_pair_reply :
               "CLIENT CACHING YES: unexpected reply %a"
               Resp3.pp other))
 
-(* OPTIN-armed read: pipeline [CLIENT CACHING YES] + [args] as one
-   wire-atomic submit on the standalone primary connection. The
-   from_router / connect gate guarantees standalone here, so we
-   look up the single primary directly and bypass slot routing —
-   OPTIN cluster support adds redirect-aware retry around the
-   pair, which is a separate step. *)
+(* OPTIN-armed read: pipeline [CLIENT CACHING YES] + [args] as
+   one wire-atomic submit through the router's [pair] dispatch.
+   On cluster, MOVED on the read frame triggers redirect-aware
+   retry of the WHOLE pair on the new owner (CACHING YES stays
+   adjacent to the read); on standalone the router's pair
+   collapses to a direct [Connection.request_pair]. OPTIN
+   reads force [Read_from.Primary] regardless of the user's
+   ~read_from hint — replicas don't run CLIENT TRACKING, so a
+   replica-side read either errors or silently fails to register
+   tracking. *)
 let exec_optin_pair ?timeout t args =
-  match Router.primary_connection t.router with
-  | None -> Error Connection.Error.Closed
-  | Some conn ->
-      map_optin_pair_reply
-        (Connection.request_pair ?timeout conn
-           [| "CLIENT"; "CACHING"; "YES" |] args)
+  let target =
+    match Command_spec.target_and_rf Router.Read_from.Primary args with
+    | Some (target, _rf) -> target
+    | None -> Router.Target.Random
+  in
+  map_optin_pair_reply
+    (Router.pair ?timeout t.router target Router.Read_from.Primary
+       [| "CLIENT"; "CACHING"; "YES" |] args)
 
 let exec_multi ?timeout ?fan t args =
   let fan =

@@ -49,6 +49,7 @@
           test_csc_bcast
           test_csc_optin
           test_csc_optin_unit
+          test_csc_optin_cluster
           test_resp3
           test_resp3_roundtrip
           test_retry_state

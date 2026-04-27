@@ -97,90 +97,6 @@ let test_map_protocol_violation () =
          | Ok v -> Format.asprintf "Ok %a" R.pp v
          | Error e -> Format.asprintf "Error %a" E.pp e)
 
-(* ---------- cluster + OPTIN gate at Client.from_router ---------- *)
-
-(* Build a Router that reports is_standalone = false without
-   needing a real cluster pool: synthesise a 2-shard topology
-   and an empty pool, then wrap via
-   Cluster_router.from_pool_and_topology. The from_router gate
-   only inspects [Router.is_standalone]; it never dispatches a
-   command, so the empty pool is fine. *)
-module Topology = Valkey.Topology
-
-let mk_node ~id ~port : Topology.Node.t =
-  { id;
-    endpoint = None;
-    ip = Some "127.0.0.1";
-    hostname = None;
-    port = Some port;
-    tls_port = None;
-    role = Primary;
-    health = Online;
-    replication_offset = 0L;
-    availability_zone = None }
-
-let mk_shard ~id ~start_ ~end_ ~node_id ~port : Topology.Shard.t =
-  { id = Some id;
-    slots = [ { start_; end_ } ];
-    primary = mk_node ~id:node_id ~port;
-    replicas = [] }
-
-let make_two_primary_router env =
-  let clock = Eio.Stdenv.clock env in
-  let pool = Valkey.Node_pool.create () in
-  let topology =
-    Topology.of_shards
-      [ mk_shard ~id:"shard-a" ~start_:0 ~end_:8191
-          ~node_id:"node-a" ~port:6379;
-        mk_shard ~id:"shard-b" ~start_:8192 ~end_:16383
-          ~node_id:"node-b" ~port:6380;
-      ]
-  in
-  Valkey.Cluster_router.from_pool_and_topology
-    ~clock ~pool ~topology ()
-
-let test_cluster_optin_gate_raises () =
-  Eio_main.run @@ fun env ->
-  let router = make_two_primary_router env in
-  Alcotest.check_raises
-    "Optin on cluster router raises Invalid_argument"
-    (Invalid_argument
-       "Client.from_router: client_cache mode=Optin is only \
-        supported on standalone routers in this release; \
-        cluster + OPTIN is planned but not yet wired.")
-    (fun () ->
-       let cache = Cache.create ~byte_budget:1024 in
-       let ccfg = CC.make ~cache ~mode:CC.Optin () in
-       let cfg : Client.Config.t =
-         { Client.Config.default with client_cache = Some ccfg }
-       in
-       ignore (Client.from_router ~config:cfg router))
-
-let test_cluster_default_gate_does_not_raise () =
-  Eio_main.run @@ fun env ->
-  let router = make_two_primary_router env in
-  let cache = Cache.create ~byte_budget:1024 in
-  let ccfg = CC.make ~cache ~mode:CC.Default () in
-  let cfg : Client.Config.t =
-    { Client.Config.default with client_cache = Some ccfg }
-  in
-  let _ = Client.from_router ~config:cfg router in
-  Alcotest.(check bool) "Default mode is allowed on cluster routers" true true
-
-let test_cluster_bcast_gate_does_not_raise () =
-  Eio_main.run @@ fun env ->
-  let router = make_two_primary_router env in
-  let cache = Cache.create ~byte_budget:1024 in
-  let ccfg =
-    CC.make ~cache
-      ~mode:(CC.Bcast { prefixes = [ "user:" ] }) ()
-  in
-  let cfg : Client.Config.t =
-    { Client.Config.default with client_cache = Some ccfg }
-  in
-  let _ = Client.from_router ~config:cfg router in
-  Alcotest.(check bool) "Bcast mode is allowed on cluster routers" true true
-
 let tests =
   [ Alcotest.test_case "map: outer Error passes through" `Quick
       test_map_outer_error;
@@ -190,10 +106,4 @@ let tests =
       test_map_happy_path;
     Alcotest.test_case "map: non-OK CACHING reply -> Protocol_violation" `Quick
       test_map_protocol_violation;
-    Alcotest.test_case "from_router gate: Optin on cluster raises" `Quick
-      test_cluster_optin_gate_raises;
-    Alcotest.test_case "from_router gate: Default on cluster does not raise" `Quick
-      test_cluster_default_gate_does_not_raise;
-    Alcotest.test_case "from_router gate: Bcast on cluster does not raise" `Quick
-      test_cluster_bcast_gate_does_not_raise;
   ]

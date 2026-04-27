@@ -254,6 +254,81 @@ let handle_retries ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
   in
   loop 0 (dispatch ())
 
+(* Pair dispatch + redirect-aware retry for OPTIN CSC reads.
+   Mirrors [make_exec] but the dispatch returns a pair-result
+   from [Connection.request_pair]. On MOVED for the read frame,
+   the WHOLE pair is re-submitted on the new owner so frame 1
+   ([CLIENT CACHING YES]) stays adjacent to frame 2 (the read).
+   The wasted CACHING YES on the old connection is benign — the
+   server consumed it on a frame that returned MOVED, no
+   tracking was registered.
+
+   ASK redirects on the read are not retried: an ASK retry would
+   require [ASKING + CACHING YES + read] as three wire-adjacent
+   frames, which [Connection.request_pair] (two-frame) cannot
+   express. ASK is surfaced as a [Server_error] to the caller —
+   rare in practice; covered by a follow-up if needed. *)
+let make_pair ~pool ~topology_ref ~clock:_ ~max_redirects ~trigger_refresh
+    ?timeout (target : Router.Target.t) (rf : Router.Read_from.t)
+    (args1 : string array) (args2 : string array) =
+  let dispatch () =
+    let topology = !topology_ref in
+    match target with
+    | Router.Target.By_slot slot ->
+        (match Topology.shard_for_slot topology slot with
+         | None -> err_protocol "no shard owns slot %d" slot
+         | Some shard ->
+             let node = pick_node_by_read_from rf shard in
+             (match Node_pool.get pool node.id with
+              | None -> err_terminal "no live connection for node %s" node.id
+              | Some conn ->
+                  Connection.request_pair ?timeout conn args1 args2))
+    | Router.Target.By_node node_id ->
+        (match Node_pool.get pool node_id with
+         | None -> err_terminal "unknown node %s" node_id
+         | Some conn ->
+             Connection.request_pair ?timeout conn args1 args2)
+    | Router.Target.Random | Router.Target.By_channel _ ->
+        err_terminal
+          "Router.pair: only By_slot / By_node supported (OPTIN reads)"
+  in
+  let rec loop attempt =
+    let result = dispatch () in
+    match result with
+    | Error _ -> result                         (* outer transport error *)
+    | Ok (Error _, _) -> result                  (* CACHING transport error *)
+    | Ok (Ok _, Ok _) -> result                  (* success *)
+    | Ok (Ok _, Error (Connection.Error.Server_error ve))
+      when attempt < max_redirects ->
+        (match Redirect.of_valkey_error ve with
+         | Some { kind = Redirect.Moved; host; port; slot } ->
+             (match
+                Topology.find_node_by_address !topology_ref ~host ~port
+              with
+              | None ->
+                  trigger_refresh ();
+                  result
+              | Some node ->
+                  let topology_agrees =
+                    match Topology.shard_for_slot !topology_ref slot with
+                    | Some shard -> shard.primary.id = node.id
+                    | None -> false
+                  in
+                  if not topology_agrees then trigger_refresh ();
+                  (match Node_pool.get pool node.id with
+                   | None ->
+                       trigger_refresh ();
+                       result
+                   | Some _ ->
+                       loop (attempt + 1)))
+         | Some { kind = Redirect.Ask; _ } ->
+             (* See header comment — ASK retry needs 3 frames. *)
+             result
+         | None -> result)
+    | Ok (Ok _, Error _) -> result               (* non-redirect read err *)
+  in
+  loop 0
+
 let make_exec ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
     ?timeout (target : Router.Target.t) (rf : Router.Read_from.t)
     (args : string array) =
@@ -371,6 +446,18 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
   let exec_multi ?timeout fan args =
     make_exec_multi ~pool ~topology_ref ?timeout fan args
   in
+  (* Standalone-as-cluster pair: just call request_pair on the
+     single connection. No redirect handling needed — there's
+     only one node. The full cluster path with retry logic lives
+     in [create] below. *)
+  let pair ?timeout _target _rf args1 args2 =
+    match Node_pool.connections pool with
+    | [] ->
+        Error
+          (Connection.Error.Terminal
+             "cluster router: no live connections")
+    | conn :: _ -> Connection.request_pair ?timeout conn args1 args2
+  in
   let close () = Node_pool.close_all pool in
   let primary () =
     match Node_pool.connections pool with [] -> None | c :: _ -> Some c
@@ -397,8 +484,9 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
   let atomic_lock_for_slot slot =
     atomic_lock_for_slot_via ~topology_ref ~for_primary slot
   in
-  Router.make ~exec ~exec_multi ~close ~primary ~connection_for_slot
-    ~endpoint_for_slot ~is_standalone ~atomic_lock_for_slot
+  Router.make ~exec ~exec_multi ~pair ~close ~primary
+    ~connection_for_slot ~endpoint_for_slot ~is_standalone
+    ~atomic_lock_for_slot
 
 (* ---------- refresh fiber ---------- *)
 
@@ -601,6 +689,12 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
         sync_ref ();
         make_exec_multi ~pool ~topology_ref ?timeout fan args
       in
+      let pair ?timeout target rf args1 args2 =
+        sync_ref ();
+        make_pair ~pool ~topology_ref ~clock
+          ~max_redirects:cfg.max_redirects ~trigger_refresh
+          ?timeout target rf args1 args2
+      in
       let close () =
         if Atomic.exchange closing true then ()
         else begin
@@ -629,7 +723,7 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
         sync_ref ();
         atomic_lock_for_slot_via ~topology_ref ~for_primary slot
       in
-      Ok (Router.make ~exec ~exec_multi ~close ~primary
+      Ok (Router.make ~exec ~exec_multi ~pair ~close ~primary
             ~connection_for_slot ~endpoint_for_slot
             ~is_standalone:false
             ~atomic_lock_for_slot)

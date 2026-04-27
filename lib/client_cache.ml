@@ -22,6 +22,12 @@ type mode =
       cached read. Mutually exclusive with [Bcast] (the server
       rejects [TRACKING ... BCAST OPTIN]).
 
+      Supported on both standalone and cluster — on cluster the
+      [CLIENT CACHING YES] + read pair travels through the
+      router's redirect-aware retry, so a slot move between the
+      pair's two frames re-submits the whole pair on the new
+      owner.
+
       OPTIN reads always go to the primary, regardless of any
       [~read_from] hint passed to [Client.get] / [mget] / etc.
       Replicas don't run [CLIENT TRACKING], so a replica-side
