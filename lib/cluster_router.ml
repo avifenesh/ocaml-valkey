@@ -255,22 +255,30 @@ let handle_retries ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
   loop 0 (dispatch ())
 
 (* Pair dispatch + redirect-aware retry for OPTIN CSC reads.
-   Mirrors [make_exec] but the dispatch returns a pair-result
-   from [Connection.request_pair]. On MOVED for the read frame,
-   the WHOLE pair is re-submitted on the new owner so frame 1
-   ([CLIENT CACHING YES]) stays adjacent to frame 2 (the read).
-   The wasted CACHING YES on the old connection is benign — the
-   server consumed it on a frame that returned MOVED, no
-   tracking was registered.
+   Mirrors [handle_retries] for the pair-result shape returned
+   by [Connection.request_pair]. The retry policy is identical
+   to single-command [exec]:
 
-   ASK redirects on the read are not retried: an ASK retry would
-   require [ASKING + CACHING YES + read] as three wire-adjacent
-   frames, which [Connection.request_pair] (two-frame) cannot
-   express. ASK is surfaced as a [Server_error] to the caller —
-   rare in practice; covered by a follow-up if needed. *)
-let make_pair ~pool ~topology_ref ~clock:_ ~max_redirects ~trigger_refresh
+   - MOVED on the read frame: the WHOLE pair is re-submitted on
+     the new owner's connection directly (mirrors handle_retries'
+     send_once path — does NOT go back through topology, since
+     trigger_refresh's effect is async and topology may still
+     point at the old primary). frame 1 stays adjacent to
+     frame 2 across the redirect; the wasted CACHING YES on the
+     old connection is benign (server consumed it on a frame it
+     returned MOVED for, no tracking was registered).
+   - ASK on the read frame: surfaced as [Server_error] without
+     retry. An ASK retry would need [ASKING + CACHING YES + read]
+     as three wire-adjacent frames; [Connection.request_pair] is
+     two-frame. Rare in practice; tracked as a follow-up.
+   - CLUSTERDOWN / TRYAGAIN on the read frame: backoff +
+     re-dispatch via topology (same as handle_retries).
+   - Closed / Interrupted (outer error, or CACHING transport
+     error): refresh + re-dispatch with conn-lost backoff. *)
+let make_pair ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
     ?timeout (target : Router.Target.t) (rf : Router.Read_from.t)
     (args1 : string array) (args2 : string array) =
+  let send_on conn = Connection.request_pair ?timeout conn args1 args2 in
   let dispatch () =
     let topology = !topology_ref in
     match target with
@@ -281,23 +289,32 @@ let make_pair ~pool ~topology_ref ~clock:_ ~max_redirects ~trigger_refresh
              let node = pick_node_by_read_from rf shard in
              (match Node_pool.get pool node.id with
               | None -> err_terminal "no live connection for node %s" node.id
-              | Some conn ->
-                  Connection.request_pair ?timeout conn args1 args2))
+              | Some conn -> send_on conn))
     | Router.Target.By_node node_id ->
         (match Node_pool.get pool node_id with
          | None -> err_terminal "unknown node %s" node_id
-         | Some conn ->
-             Connection.request_pair ?timeout conn args1 args2)
+         | Some conn -> send_on conn)
     | Router.Target.Random | Router.Target.By_channel _ ->
         err_terminal
           "Router.pair: only By_slot / By_node supported (OPTIN reads)"
   in
-  let rec loop attempt =
-    let result = dispatch () in
+  let rec loop attempt result =
     match result with
-    | Error _ -> result                         (* outer transport error *)
-    | Ok (Error _, _) -> result                  (* CACHING transport error *)
-    | Ok (Ok _, Ok _) -> result                  (* success *)
+    | Error (Connection.Error.Interrupted | Connection.Error.Closed)
+      when attempt < max_redirects ->
+        trigger_refresh ();
+        Eio.Time.sleep clock conn_lost_backoff;
+        loop (attempt + 1) (dispatch ())
+    | Error _ -> result
+    | Ok (Error (Connection.Error.Interrupted | Connection.Error.Closed), _)
+      when attempt < max_redirects ->
+        (* CACHING transport error mid-pair: refresh + re-dispatch
+           with the same backoff as outer Closed. *)
+        trigger_refresh ();
+        Eio.Time.sleep clock conn_lost_backoff;
+        loop (attempt + 1) (dispatch ())
+    | Ok (Error _, _) -> result
+    | Ok (Ok _, Ok _) -> result
     | Ok (Ok _, Error (Connection.Error.Server_error ve))
       when attempt < max_redirects ->
         (match Redirect.of_valkey_error ve with
@@ -319,15 +336,25 @@ let make_pair ~pool ~topology_ref ~clock:_ ~max_redirects ~trigger_refresh
                    | None ->
                        trigger_refresh ();
                        result
-                   | Some _ ->
-                       loop (attempt + 1)))
+                   | Some conn ->
+                       loop (attempt + 1) (send_on conn)))
          | Some { kind = Redirect.Ask; _ } ->
              (* See header comment — ASK retry needs 3 frames. *)
              result
-         | None -> result)
-    | Ok (Ok _, Error _) -> result               (* non-redirect read err *)
+         | None ->
+             (match ve.code with
+              | "CLUSTERDOWN" ->
+                  Eio.Time.sleep clock
+                    (clusterdown_backoff_for_attempt attempt);
+                  trigger_refresh ();
+                  loop (attempt + 1) (dispatch ())
+              | "TRYAGAIN" ->
+                  Eio.Time.sleep clock tryagain_backoff;
+                  loop (attempt + 1) (dispatch ())
+              | _ -> result))
+    | Ok (Ok _, Error _) -> result
   in
-  loop 0
+  loop 0 (dispatch ())
 
 let make_exec ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
     ?timeout (target : Router.Target.t) (rf : Router.Read_from.t)

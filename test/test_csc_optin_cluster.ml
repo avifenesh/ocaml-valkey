@@ -177,6 +177,21 @@ let test_concurrent_optin_cluster () =
          invalidated within 3s; %d still cached"
         n (Cache.count cache)
 
+(* TODO: cluster + OPTIN + mid-flight failover integration test.
+   First attempt orchestrated CLUSTER FAILOVER FORCE on the slot's
+   shard, then issued an OPTIN read expecting MOVED-induced retry
+   via [Cluster_router.make_pair]. The test body itself passed
+   (read returned the value, eager-clear dropped the cache) but
+   [Eio.Switch.run] hung in cleanup: [trigger_refresh] fires
+   [apply_new_topology] mid-teardown, which spawns new
+   connections that don't terminate cleanly under the outer
+   switch. The cleaner test path is probably to force routing to
+   a wrong node via [?target:By_node ...] (no real failover, just
+   a synthesised MOVED), or to set [refresh_interval] to a very
+   small value so the refresh fiber settles before close. Filed
+   separately so the cluster MOVED-retry path remains
+   integration-uncovered for now (covered by code review). *)
+
 let tests =
   [ Alcotest.test_case "OPTIN cluster: two-shard populate + evict"
       `Quick test_two_shards_populate_and_evict;
