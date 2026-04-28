@@ -7,14 +7,22 @@ module Config = struct
     client_az : string option;
     read_from : Read_from.t;
     client_cache : Client_cache.t option;
+    connections_per_node : int;
   }
   let default = {
     connection = Connection.Config.default;
     client_az = None;
     read_from = Read_from.default;
     client_cache = None;
+    connections_per_node = 1;
   }
 end
+
+let validate_connections_per_node n =
+  if n < 1 then
+    invalid_arg
+      (Printf.sprintf
+         "Client.connect: connections_per_node must be >= 1 (got %d)" n)
 
 (* Merge [Config.client_cache] into the inner [Connection.Config]
    so every Connection the Client builds carries the same cache
@@ -44,19 +52,24 @@ type t = {
 
 let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port () =
   (* Standalone is a degenerate one-shard cluster: synthesise a topology,
-     stash the one Connection in a Node_pool, and dispatch through the
-     same Cluster_router code path that handles real clusters. *)
+     stash a bundle of N Connections in the Node_pool, and dispatch
+     through the same Cluster_router code path that handles real
+     clusters. N = config.connections_per_node (default 1). *)
+  validate_connections_per_node config.connections_per_node;
   let conn_cfg = resolve_connection_config config in
-  let connection =
-    Connection.connect ~sw ~net ~clock ?domain_mgr
-      ~config:conn_cfg ~host ~port ()
+  let bundle =
+    Array.init config.connections_per_node (fun _ ->
+        Connection.connect ~sw ~net ~clock ?domain_mgr
+          ~config:conn_cfg ~host ~port ())
   in
   let tls_port =
     if config.connection.tls <> None then Some port else None
   in
   let topology = Topology.single_primary ~host ~port ?tls_port () in
   let pool = Node_pool.create () in
-  Node_pool.add pool Topology.standalone_node_id connection;
+  Node_pool.add_bundle pool
+    ~node_id:Topology.standalone_node_id
+    bundle;
   let router =
     Cluster_router.from_pool_and_topology ~clock ~pool ~topology ()
   in

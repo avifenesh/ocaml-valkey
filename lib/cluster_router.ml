@@ -8,6 +8,7 @@ module Config = struct
     prefer_hostname : bool;
     refresh_interval : float;
     refresh_jitter : float;
+    connections_per_node : int;
   }
 
   let default ~seeds = {
@@ -19,6 +20,7 @@ module Config = struct
     prefer_hostname = false;
     refresh_interval = 15.0;
     refresh_jitter = 15.0;
+    connections_per_node = 1;
   }
 end
 
@@ -89,8 +91,8 @@ let pick_node_by_read_from (rf : Router.Read_from.t) (shard : Topology.Shard.t) 
        | Some n -> n
        | None -> any_replica_or_primary ())
 
-let build_pool ~sw ~net ~clock ?domain_mgr ~connection_config ~prefer_hostname
-    topology =
+let build_pool ~sw ~net ~clock ?domain_mgr ~connection_config
+    ~connections_per_node ~prefer_hostname topology =
   let pool = Node_pool.create () in
   let tls_enabled = connection_config.Connection.Config.tls <> None in
   List.iter
@@ -102,11 +104,12 @@ let build_pool ~sw ~net ~clock ?domain_mgr ~connection_config ~prefer_hostname
         with
         | Some host, Some port ->
             (try
-               let conn =
-                 Connection.connect ~sw ~net ~clock ?domain_mgr
-                   ~config:connection_config ~host ~port ()
+               let bundle =
+                 Array.init connections_per_node (fun _ ->
+                     Connection.connect ~sw ~net ~clock ?domain_mgr
+                       ~config:connection_config ~host ~port ())
                in
-               Node_pool.add pool node.id conn
+               Node_pool.add_bundle pool ~node_id:node.id bundle
              with _ -> ())
         | _ -> ()
       end)
@@ -198,7 +201,9 @@ let handle_retries ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
                          | None -> false
                        in
                        if not topology_agrees then trigger_refresh ());
-                  (match Node_pool.get pool node.id with
+                  (match
+                     Node_pool.pick_for_slot pool ~node_id:node.id ~slot
+                   with
                    | None ->
                        (* Pool doesn't have the redirect target —
                           race against pool-diff. Trigger refresh so
@@ -280,13 +285,15 @@ let make_pair ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
         (match Topology.shard_for_slot !topology_ref slot with
          | None -> err_protocol "no shard owns slot %d" slot
          | Some shard ->
-             (match Node_pool.get pool shard.primary.id with
+             (match
+                Node_pool.pick_for_slot pool ~node_id:shard.primary.id ~slot
+              with
               | None ->
                   err_terminal "no live connection for node %s"
                     shard.primary.id
               | Some conn -> send_on conn))
     | Router.Target.By_node node_id ->
-        (match Node_pool.get pool node_id with
+        (match Node_pool.pick pool ~node_id with
          | None -> err_terminal "unknown node %s" node_id
          | Some conn -> send_on conn)
     | Router.Target.Random | Router.Target.By_channel _ ->
@@ -328,13 +335,15 @@ let make_pair ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
                     | None -> false
                   in
                   if not topology_agrees then trigger_refresh ();
-                  (match Node_pool.get pool node.id with
+                  (match
+                     Node_pool.pick_for_slot pool ~node_id:node.id ~slot
+                   with
                    | None ->
                        trigger_refresh ();
                        result
                    | Some conn ->
                        loop (attempt + 1) (send_on conn)))
-         | Some { kind = Redirect.Ask; host; port; _ } ->
+         | Some { kind = Redirect.Ask; host; port; slot; _ } ->
              (* ASK retry: send [CACHING YES + ASKING + read] as
                 three wire-adjacent frames on the new owner.
                 Order is load-bearing — the server's [ASKING] flag
@@ -352,7 +361,9 @@ let make_pair ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
               with
               | None -> trigger_refresh (); result
               | Some node ->
-                  (match Node_pool.get pool node.id with
+                  (match
+                     Node_pool.pick_for_slot pool ~node_id:node.id ~slot
+                   with
                    | None -> trigger_refresh (); result
                    | Some conn ->
                        let triple =
@@ -399,16 +410,18 @@ let make_exec ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
          | None -> err_protocol "no shard owns slot %d" slot
          | Some shard ->
              let node = pick_node_by_read_from rf shard in
-             (match Node_pool.get pool node.id with
+             (* Round-robin across the node's bundle — single-frame
+                dispatch doesn't need slot affinity. *)
+             (match Node_pool.pick pool ~node_id:node.id with
               | None ->
                   err_terminal "no live connection for node %s" node.id
               | Some conn -> send_once ?timeout conn args))
     | Router.Target.By_node node_id ->
-        (match Node_pool.get pool node_id with
+        (match Node_pool.pick pool ~node_id with
          | None -> err_terminal "unknown node %s" node_id
          | Some conn -> send_once ?timeout conn args)
     | Router.Target.Random ->
-        (match Node_pool.connections pool with
+        (match Node_pool.all_connections pool with
          | [] -> err_terminal "cluster has no live connections"
          | conns ->
              (match pick_random conns with
@@ -433,7 +446,7 @@ let make_exec_multi ~pool ~topology_ref ?timeout
     | Router.Fan_target.All_replicas -> Topology.replicas topology
   in
   let dispatch_one (n : Topology.Node.t) =
-    match Node_pool.get pool n.id with
+    match Node_pool.pick pool ~node_id:n.id with
     | None ->
         (n.id,
          Error (Connection.Error.Terminal
@@ -446,7 +459,12 @@ let make_exec_multi ~pool ~topology_ref ?timeout
 let connection_for_slot_via ~pool ~topology_ref slot =
   match Topology.shard_for_slot !topology_ref slot with
   | None -> None
-  | Some shard -> Node_pool.get pool shard.primary.id
+  | Some shard ->
+      (* Slot-affinity pin: MULTI/EXEC and WATCH/EXEC span a
+         connection-scoped transaction, so the caller needs a
+         stable conn for [slot]. At N = 1 this is the single
+         bundle entry; at N > 1 it's [bundle.(slot mod N)]. *)
+      Node_pool.pick_for_slot pool ~node_id:shard.primary.id ~slot
 
 (* Resolve [slot] to (primary_id, host, port) using the current
    topology and the provided [prefer_hostname] preference. The
@@ -505,18 +523,26 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
   let exec_multi ?timeout fan args =
     make_exec_multi ~pool ~topology_ref ?timeout fan args
   in
-  (* Standalone-as-cluster pair: one node, no redirect handling. *)
+  (* Standalone-as-cluster pair: one node, no redirect handling.
+     With the bundle model we round-robin across the single node's
+     conns; at N = 1 this is the single bundle entry. *)
   let pair ?timeout _target args1 args2 =
-    match Node_pool.connections pool with
+    match Node_pool.node_ids pool with
     | [] ->
         Error
           (Connection.Error.Terminal
              "cluster router: no live connections")
-    | conn :: _ -> Connection.request_pair ?timeout conn args1 args2
+    | node_id :: _ ->
+        (match Node_pool.pick pool ~node_id with
+         | None ->
+             Error
+               (Connection.Error.Terminal
+                  "cluster router: no live connections")
+         | Some conn -> Connection.request_pair ?timeout conn args1 args2)
   in
   let close () = Node_pool.close_all pool in
   let primary () =
-    match Node_pool.connections pool with [] -> None | c :: _ -> Some c
+    match Node_pool.all_connections pool with [] -> None | c :: _ -> Some c
   in
   let connection_for_slot slot =
     connection_for_slot_via ~pool ~topology_ref slot
@@ -547,7 +573,7 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
 (* ---------- refresh fiber ---------- *)
 
 let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
-    ~prefer_hostname ~pool ~new_topology () =
+    ~connections_per_node ~prefer_hostname ~pool ~new_topology () =
   let new_nodes = Topology.all_nodes new_topology in
   let new_ids =
     List.map (fun (n : Topology.Node.t) -> n.id) new_nodes
@@ -557,11 +583,14 @@ let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
   List.iter
     (fun id ->
       if not (List.mem id new_ids) then
-        match Node_pool.remove pool id with
-        | Some c ->
-            (try Connection.close c
-             with Eio.Io _ | End_of_file | Invalid_argument _
-                | Unix.Unix_error _ -> ())
+        match Node_pool.remove_bundle pool ~node_id:id with
+        | Some arr ->
+            Array.iter
+              (fun c ->
+                try Connection.close c
+                with Eio.Io _ | End_of_file | Invalid_argument _
+                   | Unix.Unix_error _ -> ())
+              arr
         | None -> ())
     old_ids;
   (* Add new (online nodes only) *)
@@ -576,17 +605,18 @@ let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
         with
         | Some host, Some port ->
             (try
-               let conn =
-                 Connection.connect ~sw ~net ~clock ?domain_mgr
-                   ~config:connection_config ~host ~port ()
+               let bundle =
+                 Array.init connections_per_node (fun _ ->
+                     Connection.connect ~sw ~net ~clock ?domain_mgr
+                       ~config:connection_config ~host ~port ())
                in
-               Node_pool.add pool n.id conn
+               Node_pool.add_bundle pool ~node_id:n.id bundle
              with _ -> ())
         | _ -> ())
     new_nodes
 
 let query_pool_for_topology pool =
-  let conns = Node_pool.connections pool in
+  let conns = Node_pool.all_connections pool in
   Eio.Fiber.List.map
     (fun c ->
       match Connection.request c [| "CLUSTER"; "SHARDS" |] with
@@ -603,6 +633,7 @@ let apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
   if Topology.sha new_topo <> Topology.sha current then begin
     diff_pool ~sw ~net ~clock ?domain_mgr
       ~connection_config:cfg.Config.connection
+      ~connections_per_node:cfg.Config.connections_per_node
       ~prefer_hostname:cfg.Config.prefer_hostname
       ~pool ~new_topology:new_topo ();
     Atomic.set topology_atomic new_topo;
@@ -690,6 +721,11 @@ let refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
   try loop () with _ -> ()
 
 let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
+  if cfg.connections_per_node < 1 then
+    invalid_arg
+      (Printf.sprintf
+         "Cluster_router.create: connections_per_node must be >= 1 (got %d)"
+         cfg.connections_per_node);
   match
     Discovery.discover_from_seeds
       ~sw ~net ~clock ?domain_mgr
@@ -703,6 +739,7 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
       let pool =
         build_pool ~sw ~net ~clock ?domain_mgr
           ~connection_config:cfg.connection
+          ~connections_per_node:cfg.connections_per_node
           ~prefer_hostname:cfg.prefer_hostname
           topology
       in
@@ -748,7 +785,7 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
         end
       in
       let primary () =
-        match Node_pool.connections pool with
+        match Node_pool.all_connections pool with
         | [] -> None
         | c :: _ -> Some c
       in
