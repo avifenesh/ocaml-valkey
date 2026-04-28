@@ -1159,6 +1159,50 @@ val xreadgroup_block :
     shard, so multi-stream calls in cluster mode must still
     hash to one slot. *)
 
+(** {1 Dedicated-connection escape hatch} *)
+
+val with_dedicated_conn :
+  ?slot:int ->
+  t ->
+  (Connection.t -> ('a, Connection.Error.t) result) ->
+  ('a, blocking_error) result
+(** Lease an exclusive connection from the Blocking_pool's
+    bucket for the primary that owns [?slot] (or slot 0's
+    owner if [?slot] is omitted; for standalone the single
+    node), run the user callback [f] on it, and return the
+    conn to the pool on completion.
+
+    Unlike the typed blocking wrappers, [f] sees the raw
+    {!Connection.t} and may issue any sequence of commands on
+    it. The load-bearing use case is [WAIT]: correctness
+    requires that WAIT runs on the same connection that
+    issued the preceding write. This escape hatch guarantees
+    that invariant.
+
+    Requires [Config.blocking_pool.max_per_node >= 1];
+    otherwise returns [Error (Pool Pool_not_configured)].
+
+    On any exception or Eio cancellation raised inside [f],
+    the leased conn is closed (not returned to idle) and the
+    exception is re-raised. *)
+
+val wait_replicas_on :
+  Connection.t -> num_replicas:int -> block_ms:int ->
+  (int, Connection.Error.t) result
+(** [WAIT num_replicas block_ms] issued on [conn]. Returns
+    the number of replicas that acknowledged the writes
+    performed on [conn] before this call. Use inside
+    {!with_dedicated_conn} after the writes you want to
+    durably confirm. *)
+
+val wait_aof_on :
+  Connection.t -> num_local:int -> num_replicas:int ->
+  block_ms:int -> (int * int, Connection.Error.t) result
+(** [WAITAOF num_local num_replicas block_ms] issued on
+    [conn]. Returns the pair [(local, replicas)] — number of
+    local fsyncs and replica acks observed on [conn]'s prior
+    writes. Use inside {!with_dedicated_conn}. *)
+
 (** {1 Bitmaps} *)
 
 (** Range unit for [BITCOUNT] / [BITPOS]: whether [start] and [end]

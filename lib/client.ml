@@ -2355,6 +2355,91 @@ let xreadgroup_block ?timeout ?count ?(noack = false) t
             | Ok r -> Ok r
             | Error e -> Error (Exec e)))
 
+(* ---------- dedicated-connection escape hatch ----------
+
+   [with_dedicated_conn] leases an exclusive conn from the
+   Blocking_pool's bucket for the chosen node, runs a user
+   callback on it, and returns the conn to the pool. Unlike the
+   typed blocking wrappers, the callback sees the raw
+   [Connection.t] and may issue any sequence of commands on
+   it.
+
+   The load-bearing use case is [WAIT]: correctness requires
+   the WAIT to run on the same connection as the preceding
+   write, which means the caller must own that connection for
+   the duration of both. *)
+
+let with_dedicated_conn ?slot t f =
+  match t.blocking_pool with
+  | None -> Error (Pool Blocking_pool.Pool_not_configured)
+  | Some pool ->
+      let node_id =
+        match slot with
+        | Some s ->
+            (match Router.endpoint_for_slot t.router s with
+             | Some (id, _, _) -> Some id
+             | None -> None)
+        | None ->
+            (* No slot specified: pick a primary — slot 0's
+               owner in cluster, the synthetic standalone id
+               in standalone. *)
+            if Router.is_standalone t.router then
+              Some Topology.standalone_node_id
+            else
+              (match Router.endpoint_for_slot t.router 0 with
+               | Some (id, _, _) -> Some id
+               | None -> None)
+      in
+      (match node_id with
+       | None ->
+           Error
+             (Exec
+                (Connection.Error.Terminal
+                   "with_dedicated_conn: no primary available"))
+       | Some node_id ->
+           (match
+              Blocking_pool.with_borrowed pool ~node_id (fun conn ->
+                  f conn)
+            with
+            | Ok v -> Ok v
+            | Error (`Borrow e) -> Error (Pool e)
+            | Error (`Exec e) -> Error (Exec e)))
+
+(* WAIT / WAITAOF on an explicit Connection.t. Callers obtain
+   the conn via [with_dedicated_conn]. Running WAIT on the
+   SAME conn that issued the preceding writes is the only
+   correct usage — WAIT tallies acks against writes on the
+   current connection. *)
+
+let wait_replicas_on conn ~num_replicas ~block_ms =
+  match
+    Connection.request conn
+      [| "WAIT"; string_of_int num_replicas; string_of_int block_ms |]
+  with
+  | Error e -> Error e
+  | Ok (Resp3.Integer n) -> Ok (Int64.to_int n)
+  | Ok v -> Error (protocol_violation "WAIT" v)
+
+let wait_aof_on conn ~num_local ~num_replicas ~block_ms =
+  match
+    Connection.request conn
+      [| "WAITAOF";
+         string_of_int num_local;
+         string_of_int num_replicas;
+         string_of_int block_ms |]
+  with
+  | Error e -> Error e
+  | Ok (Resp3.Array [
+      Resp3.Integer local;
+      Resp3.Integer replicas_cnt;
+      Resp3.Integer _padded ]) ->
+      Ok (Int64.to_int local, Int64.to_int replicas_cnt)
+  | Ok (Resp3.Array [
+      Resp3.Integer local;
+      Resp3.Integer replicas_cnt ]) ->
+      Ok (Int64.to_int local, Int64.to_int replicas_cnt)
+  | Ok v -> Error (protocol_violation "WAITAOF" v)
+
 (* ---------- bitmaps ---------- *)
 
 type bit_range_unit = Byte | Bit

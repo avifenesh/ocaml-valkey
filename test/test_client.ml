@@ -986,7 +986,7 @@ let tests =
       with_blocking_client @@ fun c ->
       (* WAIT can't be run correctly on a multiplexed client.
          The typed error directs users to the dedicated-conn
-         escape hatch (Commit 4). *)
+         escape hatch. *)
       (match C.wait_replicas c ~num_replicas:0 ~block_ms:100 with
        | Error (C.Wait_needs_dedicated_conn _) -> ()
        | Ok n ->
@@ -995,6 +995,35 @@ let tests =
        | Error e ->
            Alcotest.failf "WAIT: expected Wait_needs_dedicated_conn, got %a"
              C.pp_blocking_error e));
+    Alcotest.test_case "WAIT via with_dedicated_conn + wait_replicas_on"
+      `Quick (fun () ->
+      with_blocking_client @@ fun c ->
+      (* Correct WAIT usage: SET + WAIT on the same leased
+         conn. With no configured replicas on the test server
+         WAIT returns 0 immediately. The load-bearing
+         assertion is that it returns [Ok _] via the
+         dedicated-conn path (no Wait_needs_dedicated_conn
+         error). *)
+      let key = "ocaml:c:wait:dedicated" in
+      let r =
+        C.with_dedicated_conn c (fun conn ->
+            match
+              Valkey.Connection.request conn
+                [| "SET"; key; "v" |]
+            with
+            | Error e -> Error e
+            | Ok _ ->
+                C.wait_replicas_on conn ~num_replicas:0 ~block_ms:100)
+      in
+      (match r with
+       | Ok n when n >= 0 -> ()
+       | Ok n ->
+           Alcotest.failf "wait_replicas_on: expected >=0, got %d" n
+       | Error e ->
+           Alcotest.failf "with_dedicated_conn: %a"
+             C.pp_blocking_error e);
+      let _ = C.del c [ key ] in
+      ());
     Alcotest.test_case "XREAD BLOCK timeout on empty stream" `Quick (fun () ->
       with_blocking_client @@ fun c ->
       let key = "ocaml:c:xread:empty" in
