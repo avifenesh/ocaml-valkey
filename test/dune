@@ -55,6 +55,7 @@
           test_csc_optin_migration
           test_conns_per_node
           test_conns_per_node_cluster
+          test_tcp_nodelay
           test_resp3
           test_resp3_roundtrip
           test_retry_state

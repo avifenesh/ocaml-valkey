@@ -18,11 +18,11 @@ module Config = struct
   }
 end
 
-let validate_connections_per_node n =
-  if n < 1 then
-    invalid_arg
-      (Printf.sprintf
-         "Client.connect: connections_per_node must be >= 1 (got %d)" n)
+(* Canonical validator lives on [Node_pool] so
+   [Client.Config.connections_per_node] and
+   [Cluster_router.Config.connections_per_node] can't drift
+   apart. *)
+let validate_connections_per_node = Node_pool.validate_bundle_size
 
 (* Merge [Config.client_cache] into the inner [Connection.Config]
    so every Connection the Client builds carries the same cache

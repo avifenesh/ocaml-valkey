@@ -96,14 +96,19 @@ let pick_node_by_read_from (rf : Router.Read_from.t) (shard : Topology.Shard.t) 
    and return [None]. A bundle with fewer than [n] conns would
    violate the invariant every call site assumes (round-robin
    distribution, slot-affinity indexing), and silently degraded
-   throughput is the exact failure mode the review flagged. *)
+   throughput is the exact failure mode the review flagged.
+
+   Handshakes run concurrently. On a slow network where a TLS
+   handshake is RTT-bound (50-200 ms), sequential [Array.init]
+   serialises N round-trips; [Fiber.List.init] parallelises them
+   under one switch. The outer node loop is also parallel —
+   cluster startup time becomes max(single-node handshake),
+   not sum. *)
 let connect_bundle ~sw ~net ~clock ?domain_mgr ~connection_config
     ~host ~port n =
-  let built = ref [] in
-  let rec go i =
-    if i >= n then Some (Array.of_list (List.rev !built))
-    else
-      match
+  let outcomes =
+    Eio.Fiber.List.map
+      (fun _ ->
         try
           Ok (Connection.connect ~sw ~net ~clock ?domain_mgr
                 ~config:connection_config ~host ~port ())
@@ -111,27 +116,31 @@ let connect_bundle ~sw ~net ~clock ?domain_mgr ~connection_config
         | Connection.Handshake_failed _
         | Eio.Io _
         | End_of_file
-        | Unix.Unix_error _ as e -> Error e
-      with
-      | Error _ ->
-          List.iter
-            (fun c ->
-              try Connection.close c
-              with Eio.Io _ | End_of_file | Invalid_argument _
-                 | Unix.Unix_error _ -> ())
-            !built;
-          None
-      | Ok c ->
-          built := c :: !built;
-          go (i + 1)
+        | Unix.Unix_error _ as e -> Error e)
+      (List.init n (fun _ -> ()))
   in
-  go 0
+  let oks = List.filter_map (function Ok c -> Some c | Error _ -> None) outcomes in
+  let any_err = List.exists (function Error _ -> true | _ -> false) outcomes in
+  if any_err then begin
+    List.iter
+      (fun c ->
+        try Connection.close c
+        with Eio.Io _ | End_of_file | Invalid_argument _
+           | Unix.Unix_error _ -> ())
+      oks;
+    None
+  end
+  else Some (Array.of_list oks)
 
 let build_pool ~sw ~net ~clock ?domain_mgr ~connection_config
     ~connections_per_node ~prefer_hostname topology =
   let pool = Node_pool.create () in
   let tls_enabled = connection_config.Connection.Config.tls <> None in
-  List.iter
+  (* Fan-out per node: each node's [connect_bundle] itself
+     parallelises the per-conn handshakes, and this outer
+     [Fiber.List.iter] parallelises across nodes. Startup time
+     is max(slowest-node handshake), not sum. *)
+  Eio.Fiber.List.iter
     (fun (node : Topology.Node.t) ->
       if node.health = Topology.Node.Online then begin
         match
@@ -630,7 +639,7 @@ let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
     old_ids;
   (* Add new (online nodes only) *)
   let tls_enabled = connection_config.Connection.Config.tls <> None in
-  List.iter
+  Eio.Fiber.List.iter
     (fun (n : Topology.Node.t) ->
       if not (List.mem n.id old_ids) && n.health = Topology.Node.Online
       then
@@ -755,11 +764,7 @@ let refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
   try loop () with _ -> ()
 
 let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
-  if cfg.connections_per_node < 1 then
-    invalid_arg
-      (Printf.sprintf
-         "Cluster_router.create: connections_per_node must be >= 1 (got %d)"
-         cfg.connections_per_node);
+  Node_pool.validate_bundle_size cfg.connections_per_node;
   match
     Discovery.discover_from_seeds
       ~sw ~net ~clock ?domain_mgr

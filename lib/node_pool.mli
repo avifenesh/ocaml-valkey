@@ -3,16 +3,31 @@
     reference, all have independent CLIENT ID / circuit breaker /
     reconnect state.
 
-    Default N = 1. N > 1 is the future throughput knob
-    ([Client.Config.connections_per_node]); at N = 1 this module is a
-    thin re-implementation of the old one-conn-per-node model and the
-    two pick functions return the same single connection.
+    Default N = 1. N > 1 is the throughput knob
+    ([Client.Config.connections_per_node] /
+    [Cluster_router.Config.connections_per_node]); at N = 1
+    this module is a thin re-implementation of the old
+    one-conn-per-node model and the two pick functions return
+    the same single connection.
 
-    Thread-safe across domains (internally guarded by a mutex). *)
+    Thread-safe across domains. The read path ([pick],
+    [pick_for_slot], [node_ids], [all_connections], [size],
+    [total_conns]) is lock-free — the bundle hashtable is
+    snapshot-published via an [Atomic.t]. Writers
+    ([add_bundle], [remove_bundle], [close_all]) serialise
+    under a single mutex and copy-on-write a fresh hashtable
+    before [Atomic.set]. *)
 
 type t
 
 val create : unit -> t
+
+val validate_bundle_size : int -> unit
+(** [validate_bundle_size n] raises [Invalid_argument] unless
+    [n >= 1]. Single canonical check so
+    [Client.Config.connections_per_node] and
+    [Cluster_router.Config.connections_per_node] share the
+    same validation rule and message shape. *)
 
 val add_bundle : t -> node_id:string -> Connection.t array -> unit
 (** Install [conns] as the bundle for [node_id]. Replaces any
