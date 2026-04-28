@@ -16,13 +16,17 @@ module Config : sig
     refresh_interval : float;     (** Base interval (s) between periodic
                                       topology refreshes. *)
     refresh_jitter : float;       (** Additional random wait [0, jitter] s. *)
+    connections_per_node : int;
+    (** Multiplexed connections per cluster node. Default [1].
+        See [Client.Config.connections_per_node] for the full
+        rationale. Must be [>= 1]. *)
   }
   val default : seeds:(string * int) list -> t
 end
 
 val create :
   sw:Eio.Switch.t ->
-  net:_ Eio.Net.t ->
+  net:[> [> `Generic | `Unix ] Eio.Net.ty ] Eio.Resource.t ->
   clock:_ Eio.Time.clock ->
   ?domain_mgr:_ Eio.Domain_manager.t ->
   config:Config.t ->

@@ -23,7 +23,7 @@ type t
 
 val create :
   sw:Eio.Switch.t ->
-  net:_ Eio.Net.t ->
+  net:[> [> `Generic | `Unix ] Eio.Net.ty ] Eio.Resource.t ->
   clock:_ Eio.Time.clock ->
   ?domain_mgr:_ Eio.Domain_manager.t ->
   ?connection_config:Connection.Config.t ->

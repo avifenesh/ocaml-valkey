@@ -474,6 +474,27 @@ let wrap_with_tls ~tls_cfg sock =
          | End_of_file | Eio.Io _) as exn ->
            Error (Error.Tls_failed (describe_exn exn)))
 
+(* Turn off Nagle on the freshly-connected TCP flow. Redis/Valkey
+   traffic is request/response with variable-size frames — the
+   client's writer flushes a complete command via writev and then
+   awaits a reply. Leaving Nagle enabled lets the kernel delay
+   small / partial-segment writes waiting for more data that
+   never comes, interacting with the peer's delayed-ACK timer to
+   produce ~40 ms stalls on medium-sized writes (observed with
+   16 KiB SET under TLS at N > 1). Every modern Redis/Valkey
+   client disables Nagle for the same reason.
+
+   Best-effort: we pull the Unix FD out of Eio's wrapper and
+   call [setsockopt]; if the platform doesn't support the
+   option the error is swallowed rather than failing connect. *)
+let disable_nagle tcp =
+  try
+    let fd = Eio_unix.Net.fd tcp in
+    Eio_unix.Fd.use_exn "tcp_nodelay" fd (fun ufd ->
+        try Unix.setsockopt ufd Unix.TCP_NODELAY true
+        with Unix.Unix_error _ -> ())
+  with _ -> ()
+
 let make_tcp_connector ~sw ~net ~host ~port ~tls =
   fun () ->
     match
@@ -486,6 +507,7 @@ let make_tcp_connector ~sw ~net ~host ~port ~tls =
     | Ok (addr :: _) ->
         (try
            let tcp = Eio.Net.connect ~sw net addr in
+           disable_nagle tcp;
            match tls with
            | None ->
                let reader =

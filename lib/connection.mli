@@ -65,7 +65,7 @@ exception Handshake_failed of Error.t
 
 val connect :
   sw:Eio.Switch.t ->
-  net:_ Eio.Net.t ->
+  net:[> [> `Generic | `Unix ] Eio.Net.ty ] Eio.Resource.t ->
   clock:_ Eio.Time.clock ->
   ?domain_mgr:_ Eio.Domain_manager.t ->
   ?config:Config.t ->

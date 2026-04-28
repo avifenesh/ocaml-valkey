@@ -23,6 +23,38 @@ module Config : sig
         [Invalid_argument]. Users who want CSC should set this
         field; users who build raw [Connection.t] directly set
         [Connection.Config.client_cache] instead. *)
+
+    connections_per_node : int;
+    (** Number of multiplexed connections to open per cluster node
+        (or per standalone endpoint). Default [1].
+
+        One multiplexed connection already pipelines an unbounded
+        number of concurrent fiber-issued commands through a single
+        writev + FIFO matcher; this knob is {e not} for throughput
+        under normal workloads. Raise it only for specific cases
+        where a single connection is known to bottleneck:
+
+        - TLS single-stream CPU saturation (one AES core per conn).
+        - Very large value transfers causing head-of-line blocking
+          against small commands on the same socket.
+        - Heavy CPU-bound server commands (EVAL / FUNCTION CALL /
+          SORT) where the server processes one command per
+          connection at a time.
+
+        Tradeoffs:
+        - [N > 1] costs [N × CLIENT ID]s on the server, [N] separate
+          CLIENT TRACKING registrations when [client_cache] is
+          configured, and [N] handshake round-trips at (re)connect.
+        - Round-robin load-balances single-command dispatch across
+          the bundle. Multi-frame atomic submits (OPTIN CSC pair,
+          ASK triple) pin to [bundle.(slot mod N)] for wire
+          adjacency.
+        - Transactions (WATCH/MULTI/EXEC) slot-affinity-pin to one
+          conn per slot via the same rule, so transaction state
+          stays connection-local as today.
+
+        Must be [>= 1]; [Client.connect] raises [Invalid_argument]
+        otherwise. *)
   }
   val default : t
 end
@@ -31,7 +63,7 @@ type t
 
 val connect :
   sw:Eio.Switch.t ->
-  net:_ Eio.Net.t ->
+  net:[> [> `Generic | `Unix ] Eio.Net.ty ] Eio.Resource.t ->
   clock:_ Eio.Time.clock ->
   ?domain_mgr:_ Eio.Domain_manager.t ->
   ?config:Config.t ->
