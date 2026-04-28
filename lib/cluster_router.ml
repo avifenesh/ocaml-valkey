@@ -91,6 +91,42 @@ let pick_node_by_read_from (rf : Router.Read_from.t) (shard : Topology.Shard.t) 
        | Some n -> n
        | None -> any_replica_or_primary ())
 
+(* Connect [n] independent Connections to [(host, port)]. All-or-
+   nothing: if any one fails, close the ones we'd already opened
+   and return [None]. A bundle with fewer than [n] conns would
+   violate the invariant every call site assumes (round-robin
+   distribution, slot-affinity indexing), and silently degraded
+   throughput is the exact failure mode the review flagged. *)
+let connect_bundle ~sw ~net ~clock ?domain_mgr ~connection_config
+    ~host ~port n =
+  let built = ref [] in
+  let rec go i =
+    if i >= n then Some (Array.of_list (List.rev !built))
+    else
+      match
+        try
+          Ok (Connection.connect ~sw ~net ~clock ?domain_mgr
+                ~config:connection_config ~host ~port ())
+        with
+        | Connection.Handshake_failed _
+        | Eio.Io _
+        | End_of_file
+        | Unix.Unix_error _ as e -> Error e
+      with
+      | Error _ ->
+          List.iter
+            (fun c ->
+              try Connection.close c
+              with Eio.Io _ | End_of_file | Invalid_argument _
+                 | Unix.Unix_error _ -> ())
+            !built;
+          None
+      | Ok c ->
+          built := c :: !built;
+          go (i + 1)
+  in
+  go 0
+
 let build_pool ~sw ~net ~clock ?domain_mgr ~connection_config
     ~connections_per_node ~prefer_hostname topology =
   let pool = Node_pool.create () in
@@ -103,14 +139,13 @@ let build_pool ~sw ~net ~clock ?domain_mgr ~connection_config
           port_of_node ~tls:tls_enabled node
         with
         | Some host, Some port ->
-            (try
-               let bundle =
-                 Array.init connections_per_node (fun _ ->
-                     Connection.connect ~sw ~net ~clock ?domain_mgr
-                       ~config:connection_config ~host ~port ())
-               in
-               Node_pool.add_bundle pool ~node_id:node.id bundle
-             with _ -> ())
+            (match
+               connect_bundle ~sw ~net ~clock ?domain_mgr
+                 ~connection_config ~host ~port connections_per_node
+             with
+             | Some bundle ->
+                 Node_pool.add_bundle pool ~node_id:node.id bundle
+             | None -> ())
         | _ -> ()
       end)
     (Topology.all_nodes topology);
@@ -604,14 +639,13 @@ let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
           port_of_node ~tls:tls_enabled n
         with
         | Some host, Some port ->
-            (try
-               let bundle =
-                 Array.init connections_per_node (fun _ ->
-                     Connection.connect ~sw ~net ~clock ?domain_mgr
-                       ~config:connection_config ~host ~port ())
-               in
-               Node_pool.add_bundle pool ~node_id:n.id bundle
-             with _ -> ())
+            (match
+               connect_bundle ~sw ~net ~clock ?domain_mgr
+                 ~connection_config ~host ~port connections_per_node
+             with
+             | Some bundle ->
+                 Node_pool.add_bundle pool ~node_id:n.id bundle
+             | None -> ())
         | _ -> ())
     new_nodes
 

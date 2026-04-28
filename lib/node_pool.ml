@@ -47,6 +47,14 @@ let pick t ~node_id =
         Some arr.(i)
 
 let pick_for_slot t ~node_id ~slot =
+  (* Callers resolve [slot] via [Topology.shard_for_slot],
+     [Redirect.slot], or CRC16 — all guaranteed in [0, 16383].
+     A negative slot is a programmer bug; raise loudly rather than
+     silently clamping to [bundle.(0)] and masking the regression. *)
+  if slot < 0 then
+    invalid_arg
+      (Printf.sprintf "Node_pool.pick_for_slot: slot must be >= 0 (got %d)"
+         slot);
   let bundle =
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
         Hashtbl.find_opt t.bundles node_id)
@@ -56,9 +64,7 @@ let pick_for_slot t ~node_id ~slot =
   | Some arr ->
       let n = Array.length arr in
       if n = 0 then None
-      else
-        let s = if slot < 0 then 0 else slot in
-        Some arr.(s mod n)
+      else Some arr.(slot mod n)
 
 let node_ids t =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->

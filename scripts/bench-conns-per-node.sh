@@ -23,8 +23,16 @@ cd "$(git rev-parse --show-toplevel)"
 OPS="${OPS:-30000}"
 WARMUP="${WARMUP:-2000}"
 KEYS="${KEYS:-10000}"
-OUT_DIR="${OUT_DIR:-bench-results-2026-04-28}"
+# Default to a fresh timestamped directory so re-running the script
+# never clobbers committed evidence. Override with OUT_DIR=... when
+# deliberately updating a reference set.
+OUT_DIR="${OUT_DIR:-bench-results-$(date +%Y-%m-%dT%H%M%S)}"
 
+if [ -d "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR" 2>/dev/null)" ]; then
+  echo "ERROR: OUT_DIR=$OUT_DIR is non-empty." >&2
+  echo "Pick a fresh path (or \`rm -rf\` the existing one if you mean to)." >&2
+  exit 2
+fi
 mkdir -p "$OUT_DIR"
 
 eval "$(opam env --switch=5.3.0 2>/dev/null || true)"

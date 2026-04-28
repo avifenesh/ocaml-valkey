@@ -358,7 +358,7 @@ let run_scenario ~env ~args scenario =
             ~value
         in
         let dt = Unix.gettimeofday () -. t0 in
-        if not ok then ignore (Atomic.fetch_and_add errors 1 : int);
+        if not ok then Atomic.incr errors;
         Mutex.lock buf_mutex;
         push buf dt;
         Mutex.unlock buf_mutex;

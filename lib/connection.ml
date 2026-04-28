@@ -488,12 +488,18 @@ let wrap_with_tls ~tls_cfg sock =
    call [setsockopt]; if the platform doesn't support the
    option the error is swallowed rather than failing connect. *)
 let disable_nagle tcp =
+  (* Narrow exception catch: [Eio_unix.Net.fd] and [Eio_unix.Fd.use_exn]
+     can raise [Invalid_argument] if the socket is of an unexpected
+     kind, and [setsockopt] raises [Unix_error] if the option isn't
+     supported. Other exceptions (cancellation, programmer errors)
+     must propagate — we never want to silently keep a fiber alive
+     past an [Eio.Cancel.Cancelled] during connect. *)
   try
     let fd = Eio_unix.Net.fd tcp in
     Eio_unix.Fd.use_exn "tcp_nodelay" fd (fun ufd ->
         try Unix.setsockopt ufd Unix.TCP_NODELAY true
         with Unix.Unix_error _ -> ())
-  with _ -> ()
+  with Unix.Unix_error _ | Invalid_argument _ -> ()
 
 let make_tcp_connector ~sw ~net ~host ~port ~tls =
   fun () ->
