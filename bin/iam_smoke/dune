@@ -1,0 +1,3 @@
+(executable
+ (name iam_smoke)
+ (libraries valkey eio_main))

@@ -1,0 +1,29 @@
+# Mutual-TLS Valkey target. Requires a client certificate signed
+# by our test CA for every connection. Runs alongside the main
+# docker-compose.yml (different container name, port 6391).
+#
+# Usage:
+#   bash scripts/gen-tls-certs.sh           # mints CA + server + client certs
+#   docker compose -f docker-compose.mtls.yml up -d
+#   MTLS=1 dune exec test/run_tests.exe -- test 'mtls integration'
+
+services:
+  valkey-mtls:
+    image: valkey/valkey:9
+    container_name: ocaml-valkey-mtls
+    ports:
+      - "6391:6391"
+    volumes:
+      - ./tls:/tls:ro
+    command: >-
+      valkey-server
+      --appendonly no
+      --save ""
+      --protected-mode no
+      --port 0
+      --tls-port 6391
+      --tls-cert-file /tls/server.crt
+      --tls-key-file /tls/server.key
+      --tls-ca-cert-file /tls/ca.crt
+      --tls-auth-clients yes
+    restart: unless-stopped

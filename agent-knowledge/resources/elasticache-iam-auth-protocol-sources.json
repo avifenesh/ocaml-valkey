@@ -1,0 +1,373 @@
+{
+  "topic": "AWS ElastiCache-for-Valkey/Redis IAM authentication — end-to-end protocol details for implementing a client-side token provider",
+  "slug": "elasticache-iam-auth-protocol",
+  "generated": "2026-04-28T00:00:00Z",
+  "depth": "medium",
+  "totalSources": 18,
+  "sources": [
+    {
+      "url": "https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/auth-iam.html",
+      "title": "AWS ElastiCache IAM Authentication (Redis OSS)",
+      "qualityScore": 95,
+      "scores": {
+        "authority": 10,
+        "recency": 9,
+        "depth": 10,
+        "examples": 9,
+        "uniqueness": 7
+      },
+      "keyInsights": [
+        "Token is presigned URL generated via AWS SigV4",
+        "Token TTL is 900 seconds (15 minutes)",
+        "Connection auto-disconnects after 12 hours",
+        "TLS mandatory for IAM authentication",
+        "Token passed as password parameter in AUTH/HELLO",
+        "Service name for signing is 'elasticache'"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/auth-iam.html",
+      "title": "AWS ElastiCache IAM Authentication (General)",
+      "qualityScore": 90,
+      "scores": {
+        "authority": 10,
+        "recency": 9,
+        "depth": 9,
+        "examples": 8,
+        "uniqueness": 4
+      },
+      "keyInsights": [
+        "Token construction identical for Redis and Valkey",
+        "IAM policy requires both cache and user ARNs",
+        "Valkey 7.2+ or Redis OSS 7.0+ required",
+        "Not supported inside MULTI/EXEC transactions"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/Clusters.RBAC.html",
+      "title": "ElastiCache RBAC and User Management",
+      "qualityScore": 85,
+      "scores": {
+        "authority": 10,
+        "recency": 8,
+        "depth": 8,
+        "examples": 7,
+        "uniqueness": 6
+      },
+      "keyInsights": [
+        "User groups required for IAM users",
+        "User name and user ID must be identical for IAM auth",
+        "Max 100 users per user group, 1000 total users",
+        "In-transit encryption required for RBAC"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/AmazonElastiCache/latest/APIReference/API_CreateUser.html",
+      "title": "ElastiCache CreateUser API Reference",
+      "qualityScore": 92,
+      "scores": {
+        "authority": 10,
+        "recency": 9,
+        "depth": 9,
+        "examples": 8,
+        "uniqueness": 6
+      },
+      "keyInsights": [
+        "UserId and UserName both required, must match for IAM",
+        "UserId pattern: [a-zA-Z][a-zA-Z0-9\\-]*, stored lowercase",
+        "Engine values: 'valkey' or 'redis'",
+        "AuthenticationMode.Type: 'password' | 'no-password-required' | 'iam'"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/AmazonElastiCache/latest/APIReference/API_AuthenticationMode.html",
+      "title": "AuthenticationMode Data Structure",
+      "qualityScore": 88,
+      "scores": {
+        "authority": 10,
+        "recency": 9,
+        "depth": 8,
+        "examples": 7,
+        "uniqueness": 4
+      },
+      "keyInsights": [
+        "Type field: password | no-password-required | iam",
+        "Passwords array only used when Type=password",
+        "Both Type and Passwords are optional fields",
+        "Minimum 1 password required if Type=password"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticache.html",
+      "title": "AWS Service Authorization Reference - ElastiCache",
+      "qualityScore": 90,
+      "scores": {
+        "authority": 10,
+        "recency": 9,
+        "depth": 9,
+        "examples": 8,
+        "uniqueness": 4
+      },
+      "keyInsights": [
+        "elasticache:Connect action is access level 'Write'",
+        "User resource ARN required, cache ARN optional",
+        "Condition key: aws:ResourceTag/${TagKey}",
+        "Serverless supports VPC-specific condition keys",
+        "Replication groups support aws:SourceIp condition"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html",
+      "title": "AWS Signature Version 4 Signing Examples",
+      "qualityScore": 87,
+      "scores": {
+        "authority": 10,
+        "recency": 8,
+        "depth": 9,
+        "examples": 9,
+        "uniqueness": 1
+      },
+      "keyInsights": [
+        "Canonical query string requires alphabetical sorting",
+        "Query parameters must be URI-encoded",
+        "Space encoded as %20, not +",
+        "Presigned URL includes X-Amz-Algorithm, X-Amz-Credential, X-Amz-Date, X-Amz-SignedHeaders, X-Amz-Signature",
+        "Signing key derived from date, region, service, and 'aws4_request'"
+      ]
+    },
+    {
+      "url": "https://github.com/aws-samples/elasticache-iam-auth-demo-app/blob/main/src/main/java/com/amazon/elasticache/IAMAuthTokenRequest.java",
+      "title": "IAMAuthTokenRequest Java Implementation",
+      "qualityScore": 93,
+      "scores": {
+        "authority": 9,
+        "recency": 8,
+        "depth": 10,
+        "examples": 10,
+        "uniqueness": 6
+      },
+      "keyInsights": [
+        "URL pattern: http://{replicationGroupId}/",
+        "Query parameters: Action=connect&User={userId}",
+        "Uses AWS SDK v2 AwsV4HttpSigner",
+        "Signature location: QUERY_STRING",
+        "Expiration hardcoded to 900 seconds",
+        "Service name explicitly set to 'elasticache'"
+      ]
+    },
+    {
+      "url": "https://github.com/aws-samples/elasticache-iam-auth-demo-app/blob/main/README.md",
+      "title": "ElastiCache IAM Auth Demo App Documentation",
+      "qualityScore": 86,
+      "scores": {
+        "authority": 8,
+        "recency": 8,
+        "depth": 9,
+        "examples": 9,
+        "uniqueness": 6
+      },
+      "keyInsights": [
+        "Requires Java 8+, ElastiCache 7.0+, TLS enabled",
+        "EC2 and ElastiCache must be in same VPC",
+        "Uses Lettuce Redis client with IAM token provider",
+        "DefaultCredentialsProvider for EC2 instance profile",
+        "Supports cluster-mode enabled via --cluster-mode flag"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/boto3/latest/reference/services/elasticache/client/create_user.html",
+      "title": "Boto3 ElastiCache create_user Documentation",
+      "qualityScore": 84,
+      "scores": {
+        "authority": 10,
+        "recency": 8,
+        "depth": 8,
+        "examples": 7,
+        "uniqueness": 1
+      },
+      "keyInsights": [
+        "AuthenticationMode dict structure with Type and Passwords",
+        "UserId and UserName both required",
+        "Engine: 'valkey' for 7.2+, 'redis' for 6.0-7.1",
+        "AccessString defines command/key permissions"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/cli/latest/reference/elasticache/create-user.html",
+      "title": "AWS CLI create-user Command Reference",
+      "qualityScore": 82,
+      "scores": {
+        "authority": 10,
+        "recency": 8,
+        "depth": 7,
+        "examples": 7,
+        "uniqueness": 1
+      },
+      "keyInsights": [
+        "authentication-mode shorthand: Type=string,Passwords=string,string",
+        "user-id pattern: [a-zA-Z][a-zA-Z0-9\\-]*",
+        "No IAM-specific example provided in docs",
+        "Engine values: 'valkey' or 'redis'"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/Clusters.Create.html",
+      "title": "ElastiCache Cluster Creation Guide",
+      "qualityScore": 80,
+      "scores": {
+        "authority": 10,
+        "recency": 8,
+        "depth": 7,
+        "examples": 7,
+        "uniqueness": 3
+      },
+      "keyInsights": [
+        "TLS required for IAM authentication",
+        "User groups assigned during cluster creation",
+        "Cluster mode enabled uses CreateReplicationGroup API",
+        "Cluster mode disabled uses CreateCacheCluster API",
+        "Valkey 7.2+ or Redis OSS 6.0+ required for RBAC"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/WhatIs.Components.html",
+      "title": "ElastiCache Components and Endpoints",
+      "qualityScore": 83,
+      "scores": {
+        "authority": 10,
+        "recency": 8,
+        "depth": 8,
+        "examples": 6,
+        "uniqueness": 5
+      },
+      "keyInsights": [
+        "Primary endpoint always resolves to current primary node",
+        "Reader endpoint round-robins across replicas via DNS",
+        "Configuration endpoint for cluster mode discovery",
+        "Node endpoints change during topology updates",
+        "Auto Discovery for dynamic node detection"
+      ]
+    },
+    {
+      "url": "https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/Replication.Endpoints.html",
+      "title": "ElastiCache Replication Group Endpoints",
+      "qualityScore": 81,
+      "scores": {
+        "authority": 10,
+        "recency": 8,
+        "depth": 7,
+        "examples": 6,
+        "uniqueness": 4
+      },
+      "keyInsights": [
+        "Primary endpoint immune to cluster changes",
+        "Reader endpoint keeps up with cluster changes in real-time",
+        "Node endpoints not immune to cluster topology changes",
+        "Configuration endpoint knows all primary and node endpoints",
+        "DNS-based routing, not load balancer"
+      ]
+    },
+    {
+      "url": "https://valkey.io/commands/hello/",
+      "title": "Valkey HELLO Command Specification",
+      "qualityScore": 78,
+      "scores": {
+        "authority": 9,
+        "recency": 9,
+        "depth": 7,
+        "examples": 6,
+        "uniqueness": 3
+      },
+      "keyInsights": [
+        "HELLO 3 AUTH <username> <password> syntax",
+        "Protocol version 3 for RESP3",
+        "Default user works with requirepass mechanism",
+        "Simple error reply if protover doesn't exist"
+      ]
+    },
+    {
+      "url": "https://valkey.io/commands/auth/",
+      "title": "Valkey AUTH Command Specification",
+      "qualityScore": 76,
+      "scores": {
+        "authority": 9,
+        "recency": 9,
+        "depth": 6,
+        "examples": 5,
+        "uniqueness": 2
+      },
+      "keyInsights": [
+        "AUTH <username> <password> two-argument form",
+        "AUTH <password> single-argument form (default user)",
+        "Returns simple string 'OK' on success",
+        "Error returned on incorrect credentials",
+        "No RESP2/RESP3-specific behavior differences"
+      ]
+    },
+    {
+      "url": "https://github.com/redis/lettuce/issues?q=elasticache",
+      "title": "Lettuce GitHub Issues - ElastiCache",
+      "qualityScore": 65,
+      "scores": {
+        "authority": 7,
+        "recency": 7,
+        "depth": 6,
+        "examples": 5,
+        "uniqueness": 5
+      },
+      "keyInsights": [
+        "Connection stability issues in AWS ElastiCache",
+        "Timeout exceptions recurring theme",
+        "HA configuration challenges",
+        "Connection failures after initial successful period",
+        "Reconnect event handling issues"
+      ]
+    },
+    {
+      "url": "https://github.com/redis/jedis",
+      "title": "Jedis GitHub Repository",
+      "qualityScore": 60,
+      "scores": {
+        "authority": 8,
+        "recency": 8,
+        "depth": 3,
+        "examples": 3,
+        "uniqueness": 3
+      },
+      "keyInsights": [
+        "Token-Based Authentication (TBA) support since v5.3.0",
+        "Built-in support for Microsoft EntraID",
+        "No explicit ElastiCache IAM support mentioned",
+        "Extension library for TBA functionality"
+      ]
+    }
+  ],
+  "sourceBreakdown": {
+    "officialDocs": 13,
+    "sampleCode": 2,
+    "githubRepos": 2,
+    "specifications": 2
+  },
+  "selfEvaluation": {
+    "coverage": 9,
+    "diversity": 8,
+    "examples": 8,
+    "accuracy": 9,
+    "gaps": [
+      "Exact error codes for expired token not documented",
+      "No mainstream Redis client has first-class ElastiCache IAM support",
+      "Cluster-mode token reuse across nodes needs empirical verification",
+      "Clock skew tolerance specifics unclear",
+      "Failover token validity behavior undocumented"
+    ]
+  },
+  "notesForImplementers": [
+    "Token generation requires full AWS SigV4 implementation or AWS SDK dependency",
+    "No ElastiCache-specific error codes; must detect expiry via generic AUTH failures",
+    "12-hour connection limit requires either reconnect or in-place re-authentication strategy",
+    "User-id/user-name identity constraint for IAM users is critical (CreateUser will fail if different)",
+    "TLS is non-negotiable; ElastiCache will reject IAM auth attempts without TLS",
+    "Token is region-locked; multi-region deployments need per-region token generation",
+    "Case normalization: cluster IDs are lowercased by AWS; sign with lowercase to avoid mismatch"
+  ]
+}

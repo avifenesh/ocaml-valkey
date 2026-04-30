@@ -92,6 +92,7 @@ val make :
   connection_for_slot:connection_for_slot_fn ->
   endpoint_for_slot:endpoint_for_slot_fn ->
   endpoint_for_node:endpoint_for_node_fn ->
+  all_connections:(unit -> Connection.t list) ->
   is_standalone:bool ->
   atomic_lock_for_slot:(int -> Eio.Mutex.t) ->
   t
@@ -136,6 +137,15 @@ val endpoint_for_node : t -> node_id:string -> (string * int) option
 (** Returns [Some (host, port)] for [node_id] if that id is live in
     the current topology, or [None] otherwise (drained / unknown).
     Consumed by {!Blocking_pool}. *)
+
+val all_connections : t -> Connection.t list
+(** Snapshot of every live [Connection.t] the router currently
+    holds. For cluster mode this enumerates every bundle
+    connection across every node; for standalone it's the
+    single connection (or the [connections_per_node] bundle).
+    Consumed by {!Iam_provider} to drive in-place AUTH refresh
+    across the whole fleet without the caller having to track
+    individual connections. *)
 
 val is_standalone : t -> bool
 (** [true] only for the synthetic standalone/single-node path

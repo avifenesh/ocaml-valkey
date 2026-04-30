@@ -26,3 +26,6 @@ module Client_cache = Client_cache
 module Invalidation = Invalidation
 module Inflight = Inflight
 module Observability = Observability
+module Iam_credentials = Iam_credentials
+module Iam_sigv4 = Iam_sigv4
+module Iam_provider = Iam_provider

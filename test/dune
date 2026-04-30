@@ -18,7 +18,10 @@
           test_invalidation
           test_inflight
           test_csc_optin_unit
-          test_observability)
+          test_observability
+          test_iam_sigv4
+          test_iam_provider
+          test_mtls_config)
  (libraries valkey alcotest eio_main opentelemetry))
 
 ; Integration tests — need a live Valkey / cluster. Built as a
@@ -57,6 +60,9 @@
           test_conns_per_node_cluster
           test_tcp_nodelay
           test_blocking_pool_integration
+          test_blocking_pool_stress
+          test_mtls_integration
+          test_auth_refresh_loop
           test_resp3
           test_resp3_roundtrip
           test_retry_state
@@ -69,5 +75,8 @@
           test_command_spec
           test_cache
           test_invalidation
-          test_inflight)
+          test_inflight
+          test_iam_sigv4
+          test_iam_provider
+          test_mtls_config)
  (libraries valkey alcotest eio_main str))

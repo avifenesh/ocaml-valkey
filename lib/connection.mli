@@ -12,10 +12,44 @@ module Circuit_breaker : sig
   end
 end
 
+module Auth : sig
+  (** An authentication provider. A [provider] carries a short
+      name (surfaced as the [valkey.auth.mode] span attribute for
+      observability) plus a [unit -> (string * string)] closure
+      that returns [(user, password)] on demand.
+
+      The closure is invoked once per handshake — initial connect
+      AND every reconnect, so short-lived credentials (IAM tokens,
+      rotated env-vars) flow in without client-code changes.
+
+      The type is abstract to keep credential-handling closures
+      out of public pattern-matches; only {!call} can invoke
+      the underlying function, and it is the only thing
+      [Connection] internals need. *)
+  type provider
+
+  val static : user:string -> password:string -> provider
+  (** Fixed-credential provider. [name] is ["static"]. Equivalent
+      to [custom ~name:"static" (fun () -> (user, password))]. *)
+
+  val custom : name:string -> (unit -> string * string) -> provider
+  (** Build a provider from an arbitrary closure. [name] is a
+      short tag used only for observability (e.g. ["vault"],
+      ["env"], ["iam"]); never logged alongside credentials. *)
+
+  val name : provider -> string
+
+  val call : provider -> string * string
+  (** Invoke the underlying closure. Intended for [Connection]
+      internals; exposed publicly so {!refresh_auth} callers that
+      already hold a [provider] don't have to plumb the closure
+      separately. *)
+end
+
 module Handshake : sig
   type t = {
     protocol : int;
-    auth : (string * string) option;
+    auth : Auth.provider option;
     client_name : string option;
     select_db : int option;
   }
@@ -175,5 +209,30 @@ val interrupt : t -> unit
     reconnect path. Used by higher layers when a timed-out
     MULTI/EXEC-like sequence leaves server-side connection state
     potentially tainted. *)
+
+val refresh_auth :
+  t -> user:string -> password:string ->
+  (unit, Error.t) result
+(** Send [AUTH user password] on the live connection. On success
+    the connection continues on the refreshed credentials; the
+    socket is not disturbed. On any wire or server error the
+    connection is {!interrupt}ed so the supervisor reconnects —
+    the reconnect handshake will call the configured
+    {!Auth.provider} again, picking up whatever refreshed
+    credentials the caller has produced since.
+
+    Typical caller: an IAM token-refresh fiber that signs a new
+    SigV4 token every ~10 minutes and pushes it onto registered
+    connections. The configured provider must be updated by the
+    caller before or alongside this call — [refresh_auth] does
+    not re-read the provider, only the explicit [user] /
+    [password] arguments.
+
+    [Ok ()] — AUTH succeeded.
+    [Error (Auth_failed _)] — server rejected credentials
+       ([WRONGPASS] / [NOAUTH] / [NOPERM]). Connection is now
+       reconnecting.
+    [Error e] — any other transport / protocol failure; the
+       connection is interrupted so the supervisor takes over. *)
 
 val close : t -> unit

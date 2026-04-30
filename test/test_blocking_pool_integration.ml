@@ -393,6 +393,153 @@ let test_cluster_blpop_data_ready () =
     let _ = C.del c [ key ] in
     ()
 
+(* ---------- Test 15: real-failover via CLUSTER FAILOVER FORCE ----
+   Complements test 6 (synthetic [drain_node]) with the live-failover
+   path. Covers the ROADMAP "confirmed under a live failover" clause.
+
+   Failover in Valkey cluster keeps both nodes in [CLUSTER SHARDS]
+   with their node_ids intact; only the slot-ownership moves. The
+   pool keys buckets by node_id, so [on_node_removed] /
+   [on_node_refreshed] do NOT fire for a plain role-swap — the old
+   master's bucket just stops seeing new borrows. The test-worthy
+   behaviour is therefore routing correctness:
+
+     1. Warm the pool with a lease against the current primary
+        (old master), producing a live bucket.
+     2. Force a failover on that shard (replica promoted → new
+        master owns the slot).
+     3. Exercise the blocking path again. The first blpop should
+        either (a) succeed against the new primary (the router has
+        refreshed and the pool opened a fresh bucket keyed by the
+        new master's node_id), or (b) surface a typed
+        [Exec (Server_error MOVED)] that the caller can retry. No
+        hang, no untyped exception, no leaked in-use lease. *)
+
+let force_failover_for_slot env ~slot =
+  match Test_support.Cluster_nodes.replica_of_slot_owner env ~slot with
+  | None ->
+      Alcotest.failf
+        "no replica found for shard owning slot %d" slot
+  | Some (fo_host, fo_port) ->
+      Eio.Switch.run @@ fun sw ->
+      let net = Eio.Stdenv.net env in
+      let clock = Eio.Stdenv.clock env in
+      let conn =
+        Valkey.Connection.connect
+          ~sw ~net ~clock
+          ~config:Valkey.Connection.Config.default
+          ~host:fo_host ~port:fo_port ()
+      in
+      let _ =
+        Valkey.Connection.request
+          conn [| "CLUSTER"; "FAILOVER"; "FORCE" |]
+      in
+      Valkey.Connection.close conn
+
+let with_cluster_client_refresh ?(pool = BP.Config.default)
+    ~refresh_interval f =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let pool_ref = ref None in
+  let cr_config = {
+    (Valkey.Cluster_router.Config.default ~seeds) with
+    topology_hooks = C.topology_hooks_for_pool_ref pool_ref;
+    refresh_interval;
+  } in
+  let router =
+    match
+      Valkey.Cluster_router.create ~sw ~net ~clock ~config:cr_config ()
+    with
+    | Ok r -> r
+    | Error s -> Alcotest.failf "cluster_router: %s" s
+  in
+  let client_config = { C.Config.default with blocking_pool = pool } in
+  let c =
+    C.from_router ~sw ~net ~clock ~config:client_config router
+  in
+  pool_ref := C.For_testing.blocking_pool c;
+  let r =
+    try f env clock c
+    with e -> C.close c; raise e
+  in
+  C.close c;
+  r
+
+let test_node_gone_after_real_failover () =
+  if not (cluster_reachable ()) then
+    skipped "cluster-bpi: real-failover drain"
+  else
+    with_cluster_client_refresh
+      ~pool:(pool_on ~max_per_node:2 ~borrow_timeout:(Some 1.0) ())
+      ~refresh_interval:1.0
+    @@ fun env clock c ->
+    let key = "{bpi-fo}:bpi:failover" in
+    let slot = Valkey.Slot.of_key key in
+    let _ = C.del c [ key ] in
+    (* Warm the pool with one lease against the current primary,
+       bounded by a client-side timeout so a slow handshake
+       cannot hang the test. *)
+    (match
+       Eio.Time.with_timeout clock 2.0 (fun () ->
+         Ok (C.blpop c ~keys:[ key ] ~block_seconds:0.05))
+     with
+     | Ok _ | Error `Timeout -> ());
+    let pre =
+      match C.For_testing.blocking_pool c with
+      | None -> Alcotest.fail "blocking_pool should be Some _"
+      | Some pool -> BP.stats pool
+    in
+    force_failover_for_slot env ~slot;
+    (* Drive a non-blocking GET in a loop to force a MOVED →
+       router topology refresh, then poll [blpop] on the new
+       primary's bucket. The whole post-failover window is
+       client-side bounded; any hang is a hard failure. *)
+    let deadline = Eio.Time.now clock +. 10.0 in
+    let rec settle () =
+      if Eio.Time.now clock >= deadline then
+        Alcotest.fail
+          "post-failover blpop never succeeded within 10s; the \
+           pool never routed to the new primary"
+      else begin
+        let _ = C.exec ~timeout:0.5 c [| "GET"; key |] in
+        match
+          Eio.Time.with_timeout clock 1.5 (fun () ->
+            Ok (C.blpop c ~keys:[ key ] ~block_seconds:0.05))
+        with
+        | Ok (Ok _) -> ()  (* routed cleanly *)
+        | Ok (Error (C.Exec _)) ->
+            (* MOVED or transient transport — retry after a tick. *)
+            Eio.Time.sleep clock 0.3; settle ()
+        | Ok (Error e) ->
+            Alcotest.failf
+              "post-failover blpop: unexpected typed error %a"
+              C.pp_blocking_error e
+        | Error `Timeout ->
+            Eio.Time.sleep clock 0.3; settle ()
+      end
+    in
+    settle ();
+    (* Final invariants: no leaked lease, the pool [total_created]
+       must have moved at least once — either the old bucket
+       picked up a retry conn, or a fresh bucket for the new
+       primary was opened. *)
+    (match C.For_testing.blocking_pool c with
+     | None -> Alcotest.fail "blocking_pool should be Some _"
+     | Some pool ->
+         let post = BP.stats pool in
+         if post.in_use <> 0 then
+           Alcotest.failf
+             "expected in_use = 0 after settle, got %d" post.in_use;
+         if post.total_created <= pre.total_created then
+           Alcotest.failf
+             "expected total_created to grow after failover; \
+              pre=%d post=%d"
+             pre.total_created post.total_created);
+    let _ = C.del c [ key ] in
+    ()
+
 let tests =
   [ "BLPOP data-ready via pool", `Quick, test_blpop_data_ready;
     "BLPOP timeout clean return + stats",
@@ -420,4 +567,6 @@ let tests =
       `Slow, test_xread_cross_slot_rejected;
     "cluster BLPOP data-ready",
       `Slow, test_cluster_blpop_data_ready;
+    "cluster Node_gone / refreshed after CLUSTER FAILOVER FORCE",
+      `Slow, test_node_gone_after_real_failover;
   ]

@@ -657,8 +657,10 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
   let atomic_lock_for_slot slot =
     atomic_lock_for_slot_via ~topology_ref ~for_primary slot
   in
+  let all_connections () = Node_pool.all_connections pool in
   Router.make ~exec ~exec_multi ~pair ~close ~primary
     ~connection_for_slot ~endpoint_for_slot ~endpoint_for_node
+    ~all_connections
     ~is_standalone ~atomic_lock_for_slot
 
 (* ---------- refresh fiber ---------- *)
@@ -927,8 +929,10 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
         sync_ref ();
         atomic_lock_for_slot_via ~topology_ref ~for_primary slot
       in
+      let all_connections () = Node_pool.all_connections pool in
       Ok (Router.make ~exec ~exec_multi ~pair ~close ~primary
             ~connection_for_slot ~endpoint_for_slot ~endpoint_for_node
+            ~all_connections
             ~is_standalone:false
             ~atomic_lock_for_slot)
 

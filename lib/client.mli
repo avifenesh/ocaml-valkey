@@ -91,6 +91,63 @@ val connect :
   unit ->
   t
 
+val connect_with_iam :
+  sw:Eio.Switch.t ->
+  net:[> [> `Generic | `Unix ] Eio.Net.ty ] Eio.Resource.t ->
+  clock:_ Eio.Time.clock ->
+  ?domain_mgr:_ Eio.Domain_manager.t ->
+  ?config:Config.t ->
+  iam:Iam_provider.t ->
+  host:string ->
+  port:int ->
+  unit ->
+  t
+(** Standalone IAM: like {!connect}, but authenticates via an
+    [Iam_provider.t].
+
+    - The [iam] provider's [auth_provider] is installed on the
+      connection's [Handshake.auth], so initial handshake + every
+      reconnect pulls a fresh token from the cached provider
+      state.
+    - A live-connection enumerator is registered with the
+      provider so its 10-minute refresh fiber pushes AUTH onto
+      every bundle connection in place.
+    - An [Eio.Switch.on_release] callback unregisters the
+      enumerator when [sw] finishes; callers do not need manual
+      cleanup.
+
+    Any user-supplied [config.connection.handshake.auth] is
+    overridden by the IAM provider — this API is explicitly for
+    the IAM-auth path, not a mix-and-match auth setup. *)
+
+val install_iam_on_cluster_config :
+  Cluster_router.Config.t -> Iam_provider.t -> Cluster_router.Config.t
+(** Return a cluster-router config with the IAM provider's
+    [auth_provider] installed on [config.connection.handshake.auth].
+    Thread this into [Cluster_router.create] so every cluster
+    connection (including any opened later by topology refresh)
+    handshakes with a fresh IAM token. *)
+
+val from_router_with_iam :
+  ?sw:Eio.Switch.t ->
+  ?net:[> [> `Generic | `Unix ] Eio.Net.ty ] Eio.Resource.t ->
+  ?clock:_ Eio.Time.clock ->
+  ?domain_mgr:_ Eio.Domain_manager.t ->
+  config:Config.t ->
+  iam:Iam_provider.t ->
+  Router.t ->
+  t
+(** Cluster-mode IAM: wraps {!from_router} and registers a
+    live-connection enumerator with the provider so the
+    10-minute refresh fiber covers every cluster connection,
+    including any opened later by topology refresh.
+
+    The caller is responsible for threading
+    [Iam_provider.auth_provider iam] into the
+    [Cluster_router.Config]'s [handshake.auth] field BEFORE
+    calling [Cluster_router.create]. Use
+    {!install_iam_on_cluster_config} for the one-liner. *)
+
 val topology_hooks_for_pool_ref :
   Blocking_pool.t option ref -> Cluster_router.Config.topology_hooks
 (** Build a [Cluster_router.Config.topology_hooks] that closes
@@ -1820,4 +1877,9 @@ module For_testing : sig
       feature is disabled. Used by integration tests to drive
       [Blocking_pool.drain_node] directly and assert the
       resulting [Node_gone] path. *)
+
+  val router : t -> Router.t
+  (** Returns the underlying [Router.t]. Used by integration
+      tests that need to drive router-level accessors like
+      {!Router.all_connections} without a public API. *)
 end

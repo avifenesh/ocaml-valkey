@@ -173,10 +173,26 @@ module Circuit_breaker = struct
         | _ -> ())
 end
 
+module Auth = struct
+  type provider = {
+    name : string;
+    get : unit -> string * string;
+  }
+
+  let static ~user ~password =
+    { name = "static"; get = (fun () -> (user, password)) }
+
+  let custom ~name f = { name; get = f }
+
+  let name t = t.name
+
+  let call t = t.get ()
+end
+
 module Handshake = struct
   type t = {
     protocol : int;
-    auth : (string * string) option;
+    auth : Auth.provider option;
     client_name : string option;
     select_db : int option;
   }
@@ -329,7 +345,9 @@ let hello_args (hs : Handshake.t) =
   let base = [ "HELLO"; string_of_int hs.protocol ] in
   let with_auth =
     match hs.auth with
-    | Some (u, p) -> base @ [ "AUTH"; u; p ]
+    | Some provider ->
+        let (u, p) = Auth.call provider in
+        base @ [ "AUTH"; u; p ]
     | None -> base
   in
   let with_name =
@@ -344,6 +362,14 @@ let classify_handshake_error (ve : Valkey_error.t) : Error.t =
   | "WRONGPASS" | "NOAUTH" | "NOPERM" -> Auth_failed ve
   | _ -> Handshake_rejected ve
 
+let describe_exn = function
+  | End_of_file -> "peer_closed"
+  | Unix.Unix_error (e, _, _) -> Unix.error_message e
+  | Tls_eio.Tls_alert _ -> "tls_alert"
+  | Tls_eio.Tls_failure _ -> "tls_failure"
+  | Eio.Io _ -> "io_error"
+  | exn -> Printexc.exn_slot_name exn
+
 let extract_string_field key = function
   | Resp3.Map kvs ->
       List.find_map
@@ -357,17 +383,31 @@ let extract_string_field key = function
 
 
 let run_hello (sock : socket) (hs : Handshake.t) : (Resp3.t, Error.t) result =
-  sock.write [ Resp3_writer.command_to_cstruct (hello_args hs) ];
-  match Resp3_parser.read (Resp3_parser.of_buf_read sock.reader) with
-  | Map _ as m -> Ok m
-  | Simple_error s | Bulk_error s ->
-      Error (classify_handshake_error (Valkey_error.of_string s))
-  | other ->
-      Error
-        (Protocol_violation
-           (Format.asprintf "HELLO returned %a" Resp3.pp other))
-  | exception Resp3_parser.Parse_error msg ->
-      Error (Protocol_violation msg)
+  try
+    sock.write [ Resp3_writer.command_to_cstruct (hello_args hs) ];
+    match Resp3_parser.read (Resp3_parser.of_buf_read sock.reader) with
+    | Map _ as m -> Ok m
+    | Simple_error s | Bulk_error s ->
+        Error (classify_handshake_error (Valkey_error.of_string s))
+    | other ->
+        Error
+          (Protocol_violation
+             (Format.asprintf "HELLO returned %a" Resp3.pp other))
+    | exception Resp3_parser.Parse_error msg ->
+        Error (Protocol_violation msg)
+  with
+  | (Tls_eio.Tls_alert _ | Tls_eio.Tls_failure _) as exn ->
+      (* Server-sent TLS alert arrives on the first read after the
+         TCP-TLS handshake completes (e.g. mTLS rejection). Classify
+         as Tls_failed with a redacted description. *)
+      Error (Error.Tls_failed (describe_exn exn))
+  | End_of_file ->
+      (* Peer closed the TLS/TCP connection without sending HELLO
+         reply — most commonly an mTLS setup where the server
+         tore down immediately. *)
+      Error (Error.Tls_failed "peer_closed_during_handshake")
+  | Eio.Io _ as exn ->
+      Error (Error.Tls_failed (describe_exn exn))
 
 let run_select (sock : socket) db : (unit, Error.t) result =
   sock.write
@@ -458,17 +498,17 @@ let full_handshake (sock : socket) (hs : Handshake.t)
    [Unix.error_message] is stable and path-free.
    The user matches on the [Error.t] variant for programmatic
    handling; this string is for logs only. *)
-let describe_exn = function
-  | End_of_file -> "peer_closed"
-  | Unix.Unix_error (e, _, _) -> Unix.error_message e
-  | Tls_eio.Tls_alert _ -> "tls_alert"
-  | Tls_eio.Tls_failure _ -> "tls_failure"
-  | Eio.Io _ -> "io_error"
-  | exn -> Printexc.exn_slot_name exn
-
 let wrap_with_tls ~tls_cfg sock =
+  let certificates =
+    match Tls_config.client_certificates tls_cfg with
+    | `None -> None
+    | `Single _ as c -> Some c
+  in
   match
-    Tls.Config.client ~authenticator:(Tls_config.authenticator tls_cfg) ()
+    Tls.Config.client
+      ~authenticator:(Tls_config.authenticator tls_cfg)
+      ?certificates
+      ()
   with
   | Error (`Msg m) -> Error (Error.Tls_failed ("client config: " ^ m))
   | Ok client_cfg ->
@@ -558,10 +598,16 @@ let make_tcp_connector ~sw ~net ~host ~port ~tls =
 
 let connect_and_handshake t :
     (socket * handshake_result, Error.t) result =
+  let auth_mode =
+    match t.config.handshake.auth with
+    | None -> "none"
+    | Some p -> Auth.name p
+  in
   Observability.connect_span
     ~host:t.host ~port:t.port
     ~tls:(t.config.tls <> None)
     ~proto:t.config.handshake.protocol
+    ~auth_mode
     (fun _span ->
       match t.connect_once () with
       | Error e -> Error e
@@ -1185,6 +1231,22 @@ let interrupt t =
          with Eio.Io _ | End_of_file | Invalid_argument _
             | Unix.Unix_error _ -> ())
     | None -> ()
+
+let refresh_auth t ~user ~password =
+  match request t [| "AUTH"; user; password |] with
+  | Ok (Resp3.Simple_string "OK") -> Ok ()
+  | Ok other ->
+      interrupt t;
+      Error
+        (Error.Protocol_violation
+           (Format.asprintf "AUTH returned unexpected reply: %a"
+              Resp3.pp other))
+  | Error (Error.Server_error ve) ->
+      interrupt t;
+      Error (classify_handshake_error ve)
+  | Error e ->
+      interrupt t;
+      Error e
 
 let close t =
   if Atomic.exchange t.closing true then ()

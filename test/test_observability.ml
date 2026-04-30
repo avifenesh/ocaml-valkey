@@ -59,9 +59,99 @@ let test_none_emits_nothing () =
   let names = names_with_prefix ~prefix:"test.cache.absent." collected in
   Alcotest.(check (list string)) "no metrics for None" [] names
 
+(* --- Blocking_pool bridge ----------------------------------------- *)
+
+let stub_stats : O.blocking_pool_stats =
+  { in_use = 3;
+    idle = 2;
+    waiters = 1;
+    total_borrowed = 17;
+    total_created = 5;
+    total_closed_dirty = 2;
+    total_borrow_timeouts = 1;
+    total_exhaustion_rejects = 0;
+  }
+
+let test_blocking_pool_emits_eight_counters () =
+  O.observe_blocking_pool_metrics ~name:"test.bp"
+    (fun () -> Some stub_stats);
+  let collected =
+    Opentelemetry.Meter.collect Opentelemetry.Meter.dummy
+  in
+  let names = names_with_prefix ~prefix:"test.bp." collected in
+  Alcotest.(check (list string))
+    "eight metrics with stable names"
+    [ "test.bp.borrow_timeouts";
+      "test.bp.borrowed";
+      "test.bp.closed_dirty";
+      "test.bp.created";
+      "test.bp.exhaustion_rejects";
+      "test.bp.idle";
+      "test.bp.in_use";
+      "test.bp.waiters" ]
+    names
+
+let test_blocking_pool_none_emits_nothing () =
+  O.observe_blocking_pool_metrics ~name:"test.bp.absent"
+    (fun () -> None);
+  let collected =
+    Opentelemetry.Meter.collect Opentelemetry.Meter.dummy
+  in
+  let names = names_with_prefix ~prefix:"test.bp.absent." collected in
+  Alcotest.(check (list string)) "no metrics for None" [] names
+
+(* --- connect_span: valkey.auth.mode attribute --------------------- *)
+
+(* [connect_span] stamps a fixed set of attributes on the active
+   span inside [Otel.Tracer.with_]. We read them back via
+   [Opentelemetry.Span.attrs] from inside the callback — no
+   exporter needed. *)
+let test_connect_span_records_auth_mode ~auth_mode =
+  let seen_mode = ref None in
+  O.connect_span ~host:"test.example.com" ~port:6379
+    ~tls:true ~proto:3 ~auth_mode
+    (fun span ->
+      let attrs = Opentelemetry.Span.attrs span in
+      seen_mode :=
+        List.find_map
+          (fun (k, v) ->
+            if k = "valkey.auth.mode" then
+              match v with
+              | `String s -> Some s
+              | _ -> None
+            else None)
+          attrs);
+  Alcotest.(check (option string))
+    (Printf.sprintf "valkey.auth.mode = %s" auth_mode)
+    (Some auth_mode) !seen_mode
+
+let test_connect_span_auth_mode_none () =
+  test_connect_span_records_auth_mode ~auth_mode:"none"
+
+let test_connect_span_auth_mode_static () =
+  test_connect_span_records_auth_mode ~auth_mode:"static"
+
+let test_connect_span_auth_mode_iam () =
+  test_connect_span_records_auth_mode ~auth_mode:"iam"
+
+let test_connect_span_auth_mode_custom () =
+  test_connect_span_records_auth_mode ~auth_mode:"vault"
+
 let tests =
   [ Alcotest.test_case "observe_cache_metrics emits six counters" `Quick
       test_emits_six_counters;
     Alcotest.test_case "observe_cache_metrics no-op on None" `Quick
       test_none_emits_nothing;
+    Alcotest.test_case "observe_blocking_pool_metrics emits eight metrics"
+      `Quick test_blocking_pool_emits_eight_counters;
+    Alcotest.test_case "observe_blocking_pool_metrics no-op on None"
+      `Quick test_blocking_pool_none_emits_nothing;
+    Alcotest.test_case "connect_span auth_mode=none" `Quick
+      test_connect_span_auth_mode_none;
+    Alcotest.test_case "connect_span auth_mode=static" `Quick
+      test_connect_span_auth_mode_static;
+    Alcotest.test_case "connect_span auth_mode=iam" `Quick
+      test_connect_span_auth_mode_iam;
+    Alcotest.test_case "connect_span auth_mode=custom" `Quick
+      test_connect_span_auth_mode_custom;
   ]

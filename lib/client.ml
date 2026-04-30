@@ -127,6 +127,18 @@ let topology_hooks_for_pool_ref
         | None -> ()
         | Some pool -> Blocking_pool.refresh_node pool ~node_id) }
 
+let install_auth_provider_on_config
+    (conn_cfg : Connection.Config.t) (provider : Connection.Auth.provider) =
+  { conn_cfg with
+    handshake = { conn_cfg.handshake with auth = Some provider } }
+
+let install_iam_on_cluster_config
+    (cfg : Cluster_router.Config.t) (iam : Iam_provider.t) =
+  { cfg with
+    connection =
+      install_auth_provider_on_config cfg.connection
+        (Iam_provider.auth_provider iam) }
+
 let connect ~sw ~net ~clock ?domain_mgr ?(config = Config.default) ~host ~port () =
   (* Standalone is a degenerate one-shard cluster: synthesise a topology,
      stash a bundle of N Connections in the Node_pool, and dispatch
@@ -177,6 +189,62 @@ let from_router ?sw ?net ?clock ?domain_mgr ~config router =
     loaded_shas = Hashtbl.create 16;
     loaded_shas_mutex = Eio.Mutex.create ();
     blocking_pool }
+
+let connect_with_iam
+    ~sw ~net ~clock ?domain_mgr
+    ?(config = Config.default) ~iam ~host ~port () =
+  (* Install the IAM provider as the auth hook — every handshake
+     (initial + reconnect) calls [Iam_provider.auth_provider],
+     which returns the cached token without blocking. *)
+  let provider = Iam_provider.auth_provider iam in
+  let conn_cfg =
+    install_auth_provider_on_config
+      (resolve_connection_config config) provider
+  in
+  let config = { config with connection = conn_cfg } in
+  let t = connect ~sw ~net ~clock ?domain_mgr ~config ~host ~port () in
+  (* Register a live-enumerator over the router's pool. The
+     provider discovers any reconnected / refreshed connection
+     on every refresh tick without any manual bookkeeping. *)
+  let reg =
+    Iam_provider.register iam
+      (fun () -> Router.all_connections t.router)
+  in
+  Eio.Switch.on_release sw (fun () -> Iam_provider.unregister iam reg);
+  t
+
+let from_router_with_iam
+    ?sw ?net ?clock ?domain_mgr ~config ~iam router =
+  (* Cluster-mode IAM: the caller builds the [Cluster_router.t]
+     with the provider's auth pre-installed (see docs); this
+     wrapper simply registers the router's live-connection
+     enumerator so the 10-minute refresh fiber covers every
+     node's connections, including any opened later by topology
+     refresh.
+
+     For the auth hook itself, the caller is responsible for
+     threading [Iam_provider.auth_provider iam] into
+     [Cluster_router.Config.connection.handshake.auth] BEFORE
+     calling [Cluster_router.create]. Why manual: the router's
+     config shape is richer than [connect]'s flat surface, and
+     the caller typically also threads topology_hooks etc. *)
+  let t = from_router ?sw ?net ?clock ?domain_mgr ~config router in
+  let reg =
+    Iam_provider.register iam
+      (fun () -> Router.all_connections router)
+  in
+  (match sw with
+   | Some sw ->
+       Eio.Switch.on_release sw
+         (fun () -> Iam_provider.unregister iam reg)
+   | None ->
+       (* No switch supplied → blocking_pool stays None and
+          there's no refresh-fiber lifetime anchor we control.
+          Caller is responsible for calling
+          [Iam_provider.unregister] themselves if they care
+          about cleanup. *)
+       ());
+  t
 
 let close t =
   Option.iter Blocking_pool.close t.blocking_pool;
@@ -3311,4 +3379,5 @@ let memory_purge ?timeout t =
 module For_testing = struct
   let map_optin_pair_reply = map_optin_pair_reply
   let blocking_pool t = t.blocking_pool
+  let router t = t.router
 end

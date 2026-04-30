@@ -10,6 +10,7 @@
 #   SKIP_FUZZ=1           skip the fuzz step
 #   FUZZ_SECONDS=30       override fuzz duration
 #   FUZZ_WORKERS=16       override worker count
+#   SKIP_STRESS=1         skip the blocking-pool stress test
 #   SKIP_PRE_PUSH=1       skip the whole hook (emergency escape)
 
 set -euo pipefail
@@ -42,6 +43,23 @@ section "parser fuzz (100k inputs, strict)"
 dune exec bin/fuzz_parser/fuzz_parser.exe -- \
   --iterations 100000 --strict \
   || fail "parser fuzzer reported unexpected exceptions"
+
+if [ "${SKIP_STRESS:-}" = "1" ]; then
+  echo "pre-push: SKIP_STRESS=1, skipping blocking-pool stress" >&2
+else
+  # Blocking-pool stress — 1000 concurrent BLPOP callers. Needs a
+  # standalone Valkey on :6379; the test skips itself cleanly if
+  # the port isn't reachable.
+  if valkey-cli -h localhost -p 6379 PING >/dev/null 2>&1 \
+       || redis-cli -h localhost -p 6379 PING >/dev/null 2>&1; then
+    section "blocking_pool stress (1000 concurrent BLPOP, max_per_node=100)"
+    STRESS=1 dune exec test/run_tests.exe -- \
+      test 'blocking_pool stress' \
+      || fail "blocking_pool stress reported errors"
+  else
+    echo "pre-push: standalone Valkey not reachable on :6379, skipping stress" >&2
+  fi
+fi
 
 if [ "${SKIP_FUZZ:-}" = "1" ]; then
   echo "pre-push: SKIP_FUZZ=1, skipping fuzz" >&2

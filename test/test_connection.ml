@@ -345,7 +345,9 @@ let test_auth_replayed_on_reconnect () =
    | Error e -> Alcotest.failf "ACL SETUSER: %a" C.Error.pp e);
   let cfg : C.Config.t =
     { C.Config.default with
-      handshake = { C.Handshake.default with auth = Some (user, pw) } }
+      handshake =
+        { C.Handshake.default with
+          auth = Some (C.Auth.static ~user ~password:pw) } }
   in
   let auth_conn =
     C.connect ~sw ~net ~clock ~config:cfg ~host ~port ()
@@ -382,6 +384,111 @@ let test_auth_replayed_on_reconnect () =
      first round-trip; catches a "first PING happens to slip
      through but auth is broken longer-term" foot-gun. *)
   expect_simple_eq ~ctx:"PING #2 after recovery" ~expected:"PONG"
+    (C.request auth_conn [| "PING" |])
+
+(* --- refresh_auth ------------------------------------------------- *)
+
+(* Common scaffolding for the three refresh_auth tests: creates an
+   ACL user with [pw], connects as that user, runs [f] with an
+   admin and an auth'd conn, then deletes the user. *)
+let with_auth_user ~user ~pw f =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let admin = C.connect ~sw ~net ~clock ~host ~port () in
+  Fun.protect
+    ~finally:(fun () ->
+      let _ = C.request admin [| "ACL"; "DELUSER"; user |] in
+      C.close admin)
+  @@ fun () ->
+  (match
+     C.request admin
+       [| "ACL"; "SETUSER"; user; "ON";
+          ">" ^ pw; "+@all"; "~*"; "&*" |]
+   with
+   | Ok (R.Simple_string "OK") -> ()
+   | Ok v -> Alcotest.failf "ACL SETUSER: unexpected %a" R.pp v
+   | Error e -> Alcotest.failf "ACL SETUSER: %a" C.Error.pp e);
+  let cfg : C.Config.t =
+    { C.Config.default with
+      handshake =
+        { C.Handshake.default with
+          auth = Some (C.Auth.static ~user ~password:pw) } }
+  in
+  let auth_conn =
+    C.connect ~sw ~net ~clock ~config:cfg ~host ~port ()
+  in
+  Fun.protect ~finally:(fun () -> C.close auth_conn) @@ fun () ->
+  f env clock admin auth_conn
+
+(* Same-password refresh is a clean no-op from the server's POV:
+   AUTH succeeds, the socket is not disturbed, the next command
+   on the same connection works. *)
+let test_refresh_auth_same_password_is_ok () =
+  let user =
+    Printf.sprintf "ocaml_valkey_test_%d" (Random.int 1_000_000)
+  in
+  let pw = "p4ssw0rd" in
+  with_auth_user ~user ~pw @@ fun _env _clock _admin auth_conn ->
+  expect_simple_eq ~ctx:"PING before refresh" ~expected:"PONG"
+    (C.request auth_conn [| "PING" |]);
+  (match C.refresh_auth auth_conn ~user ~password:pw with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "refresh_auth same pw: %a" C.Error.pp e);
+  expect_simple_eq ~ctx:"PING after refresh" ~expected:"PONG"
+    (C.request auth_conn [| "PING" |])
+
+(* A bad password must force the connection into Recovering so the
+   supervisor reconnects with the original (valid) provider. *)
+let test_refresh_auth_bad_password_forces_recovery () =
+  let user =
+    Printf.sprintf "ocaml_valkey_test_%d" (Random.int 1_000_000)
+  in
+  let pw = "p4ssw0rd" in
+  with_auth_user ~user ~pw @@ fun _env clock _admin auth_conn ->
+  (match C.refresh_auth auth_conn ~user ~password:"definitely-wrong"
+   with
+   | Error (C.Error.Auth_failed _) -> ()
+   | Ok () ->
+       Alcotest.fail "refresh_auth with bad pw should not succeed"
+   | Error e ->
+       Alcotest.failf
+         "expected Auth_failed, got %a" C.Error.pp e);
+  (* Supervisor should reconnect using the original static
+     provider (which has the correct password), bringing state
+     back to Alive. *)
+  wait_for_alive ~clock ~deadline:3.0 auth_conn;
+  expect_simple_eq ~ctx:"PING after recovery" ~expected:"PONG"
+    (C.request auth_conn [| "PING" |])
+
+(* Rotate the ACL password out-of-band, then push the new one via
+   refresh_auth. The live socket must now be AUTH'd with the new
+   password — [PING] continues to work without reconnect. *)
+let test_refresh_auth_rotated_password () =
+  let user =
+    Printf.sprintf "ocaml_valkey_test_%d" (Random.int 1_000_000)
+  in
+  let pw = "initial-pw" in
+  let new_pw = "rotated-pw" in
+  with_auth_user ~user ~pw @@ fun _env _clock admin auth_conn ->
+  expect_simple_eq ~ctx:"PING pre-rotate" ~expected:"PONG"
+    (C.request auth_conn [| "PING" |]);
+  (* Out-of-band rotate via ACL SETUSER with a RESETPASS + new pw. *)
+  (match
+     C.request admin
+       [| "ACL"; "SETUSER"; user; "RESETPASS"; ">" ^ new_pw |]
+   with
+   | Ok (R.Simple_string "OK") -> ()
+   | Ok v -> Alcotest.failf "ACL rotate: %a" R.pp v
+   | Error e -> Alcotest.failf "ACL rotate: %a" C.Error.pp e);
+  (* In-place refresh with new password — should succeed, socket
+     not disturbed. *)
+  (match C.refresh_auth auth_conn ~user ~password:new_pw with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "refresh_auth rotated: %a" C.Error.pp e);
+  (* Server now regards this conn as AUTH'd with new_pw. *)
+  expect_simple_eq ~ctx:"PING post-rotate" ~expected:"PONG"
     (C.request auth_conn [| "PING" |])
 
 (* Second connection kills first's socket; first should recover + serve. *)
@@ -489,4 +596,11 @@ let tests =
       test_with_domain_mgr;
     Alcotest.test_case "AUTH is replayed on reconnect" `Quick
       test_auth_replayed_on_reconnect;
+    Alcotest.test_case "refresh_auth: same password is Ok" `Quick
+      test_refresh_auth_same_password_is_ok;
+    Alcotest.test_case
+      "refresh_auth: bad password forces recovery" `Quick
+      test_refresh_auth_bad_password_forces_recovery;
+    Alcotest.test_case "refresh_auth: rotated password" `Quick
+      test_refresh_auth_rotated_password;
   ]

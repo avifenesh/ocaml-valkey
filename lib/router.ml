@@ -58,16 +58,18 @@ type t = {
   connection_for_slot : connection_for_slot_fn;
   endpoint_for_slot : endpoint_for_slot_fn;
   endpoint_for_node : endpoint_for_node_fn;
+  all_connections : unit -> Connection.t list;
   is_standalone : bool;
   atomic_lock_for_slot : atomic_lock_for_slot_fn;
 }
 [@@warning "-69"]
 
 let make ~exec ~exec_multi ~pair ~close ~primary ~connection_for_slot
-    ~endpoint_for_slot ~endpoint_for_node ~is_standalone
-    ~atomic_lock_for_slot =
+    ~endpoint_for_slot ~endpoint_for_node ~all_connections
+    ~is_standalone ~atomic_lock_for_slot =
   { exec; exec_multi; pair; close; primary;
     connection_for_slot; endpoint_for_slot; endpoint_for_node;
+    all_connections;
     is_standalone;
     atomic_lock_for_slot }
 
@@ -99,6 +101,7 @@ let standalone (conn : Connection.t) : t =
        [Router.standalone] entry point (not exercised by
        Blocking_pool in practice). *)
     endpoint_for_node = (fun ~node_id:_ -> None);
+    all_connections = (fun () -> [ conn ]);
     is_standalone = true;
     atomic_lock_for_slot = (fun _ -> atomic_mutex);
   }
@@ -112,5 +115,6 @@ let primary_connection t = t.primary ()
 let connection_for_slot t slot = t.connection_for_slot slot
 let endpoint_for_slot t slot = t.endpoint_for_slot slot
 let endpoint_for_node t ~node_id = t.endpoint_for_node ~node_id
+let all_connections t = t.all_connections ()
 let is_standalone t = t.is_standalone
 let atomic_lock_for_slot t slot = t.atomic_lock_for_slot slot

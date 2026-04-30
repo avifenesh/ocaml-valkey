@@ -40,6 +40,12 @@ let () =
         Test_tcp_nodelay.tests;
       "blocking_pool integration (needs docker valkey :6379 + optional cluster)",
         Test_blocking_pool_integration.tests;
+      "blocking_pool stress (STRESS=1, needs docker valkey :6379)",
+        Test_blocking_pool_stress.tests;
+      "mtls integration (MTLS=1, needs docker-compose.mtls.yml)",
+        Test_mtls_integration.tests;
+      "auth refresh loop (needs docker valkey :6379)",
+        Test_auth_refresh_loop.tests;
       "sorted set (needs docker valkey :6379)", Test_sorted_set.tests;
       "transaction (needs docker valkey :6379)", Test_transaction.tests;
       "pubsub (needs docker valkey :6379)", Test_pubsub.tests;

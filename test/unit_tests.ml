@@ -19,4 +19,7 @@ let () =
       "inflight", Test_inflight.tests;
       "csc optin (pure)", Test_csc_optin_unit.tests;
       "observability (pure)", Test_observability.tests;
+      "iam sigv4 (pure)", Test_iam_sigv4.tests;
+      "iam provider (pure)", Test_iam_provider.tests;
+      "mtls config (pure)", Test_mtls_config.tests;
     ]
