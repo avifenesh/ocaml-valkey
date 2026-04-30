@@ -6,12 +6,22 @@
 
 | Topic | File | Sources | Depth | Created |
 |-------|------|---------|-------|---------|
+| AWS ElastiCache IAM Authentication Protocol | elasticache-iam-auth-protocol.md | 18 | medium | 2026-04-28 |
 | Connection pool designs in Redis/Valkey clients (and adjacent DB clients) | connection-pool-designs-in-redisvalkey-clients-and-adjacent-db-c.md | 23 | medium | 2026-04-28 |
 
 ## Trigger Phrases
 
 Use this knowledge when user asks about:
 
+- "ElastiCache IAM" → elasticache-iam-auth-protocol.md
+- "ElastiCache authentication" → elasticache-iam-auth-protocol.md
+- "AWS IAM token" → elasticache-iam-auth-protocol.md
+- "SigV4 signing for ElastiCache" → elasticache-iam-auth-protocol.md
+- "elasticache:Connect" → elasticache-iam-auth-protocol.md
+- "presigned URL for Redis" → elasticache-iam-auth-protocol.md
+- "IAM authentication Redis" → elasticache-iam-auth-protocol.md
+- "IAM authentication Valkey" → elasticache-iam-auth-protocol.md
+- "ElastiCache user configuration" → elasticache-iam-auth-protocol.md
 - "connection pool" → connection-pool-designs-in-redisvalkey-clients-and-adjacent-db-c.md
 - "connection pooling" → connection-pool-designs-in-redisvalkey-clients-and-adjacent-db-c.md
 - "blocking commands" → connection-pool-designs-in-redisvalkey-clients-and-adjacent-db-c.md
@@ -32,6 +42,7 @@ Use this knowledge when user asks about:
 
 | Keyword | Guide |
 |---------|-------|
+| ElastiCache, IAM, AWS, SigV4 | elasticache-iam-auth-protocol.md |
 | pool, pooling | connection-pool-designs-in-redisvalkey-clients-and-adjacent-db-c.md |
 | blocking | connection-pool-designs-in-redisvalkey-clients-and-adjacent-db-c.md |
 | multiplex | connection-pool-designs-in-redisvalkey-clients-and-adjacent-db-c.md |

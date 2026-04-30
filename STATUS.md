@@ -1,12 +1,11 @@
 # Project status and next steps
 
-**Snapshot taken:** 2026-04-28, branch `main` at commit `86cd22d` (pushed to origin).
+**Snapshot taken:** 2026-04-30, `main` with v0.3.0 tagged.
 
 This document captures what's shipped on `main`, what's immediately
-runnable, the test posture, and what's queued next. Phase 8
-(client-side caching) is now fully shipped — Default, BCAST, and
-OPTIN modes work on standalone and cluster. No 0.3.0 release yet;
-all of §2 lives unreleased on `main`.
+runnable, the test posture, and what's queued next. v0.3.0 bundles
+Phase 9 (blocking pool) + Phase 10 (AWS IAM auth + mTLS) on top of
+Phases 0–8. The tag is pushed; opam-repository PR is in flight.
 
 Canonical references this complements — not replaces:
 - [README.md](README.md) — user-facing surface.
@@ -252,21 +251,32 @@ implementing.
 
 ### Release and stabilise
 
-- [ ] **Release `valkey.0.3.0`** with everything in §2.
-  - CHANGELOG entry summarising Phase 2.5 (shipped) and Phase 8 Branch B.
-  - Follow [Phase 6 in ROADMAP.md](ROADMAP.md) for the opam-publishing
-    steps. Version bump in `dune-project`.
-  - Merge docs/client-side-caching.md into the main docs index.
+- [x] **Release `valkey.0.3.0`** — tag pushed; opam PR in flight.
+      Bundles Phase 9 (blocking pool) and Phase 10 (IAM + mTLS).
 
 ### Roadmap continuations
 
-- [ ] **Phase 9 — Connection pool.** Opt-in, first-class. ROADMAP has
-      the full scope. Per project-memory this is the correct shape:
-      pool is opt-in, matches jedis/SE.Redis/GLIDE conventions, not a
-      default-hidden thing.
-- [ ] **Phase 10 — IAM + mTLS.** mTLS client-cert support in
-      `Tls_config` (already partially scaffolded; see the stub note in
-      `docs/tls.md`). IAM for AWS ElastiCache-type deployments.
+- [x] **Phase 9 — Blocking pool** (shipped in 0.3.0). Narrowed
+      from the original "connection pool" scope — a general-purpose
+      `Client_pool.t` did not beat single-client +
+      `connections_per_node` on the bench rig, so it was dropped.
+      `Blocking_pool` stays because the multiplexed socket
+      fundamentally can't carry `BLPOP`-class commands. Module +
+      `Client` wiring + topology hooks + 14-test correctness matrix
+      + 1000-caller stress test + docs/blocking-pool.md +
+      `Observability.observe_blocking_pool_metrics` bridge. See
+      [ROADMAP.md](ROADMAP.md) for the reduced scope and the
+      decision record.
+- [x] **Phase 10 — IAM + mTLS** (shipped in 0.3.0). Pure-OCaml
+      SigV4 signer (`Iam_sigv4`), auto-refresh provider with a
+      10-minute fiber (`Iam_provider`), `Connection.Auth` first-class
+      hook + `refresh_auth`, `Client.connect_with_iam` /
+      `from_router_with_iam` wiring, `Tls_config.with_client_cert`
+      mTLS constructor, expanded `docs/security.md` + `docs/tls.md`.
+      Byte-exact SigV4 pipeline pinned; integration tests cover
+      `refresh_auth` same / bad / rotated-password paths;
+      `bin/iam_smoke/` verified end-to-end against ElastiCache for
+      Valkey serverless.
 - [ ] **Phase 11 — Module support.** Typed wrappers for `valkey-json`,
       `valkey-search`, `valkey-bloom`. Per-module opam package or a
       single `valkey-modules` meta?

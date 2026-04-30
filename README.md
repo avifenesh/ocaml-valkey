@@ -2,13 +2,14 @@
 
 A modern Valkey client for OCaml 5 + [Eio](https://github.com/ocaml-multicore/eio).
 
-**Status: alpha.** v0.2.0 is live on opam (0.1.0 was superseded
-after `@runtest` hit a server that doesn't exist in the opam
-sandbox). Full core + cluster + batch (incl. WATCH guards +
-cross-slot `pfcount_cluster`) + client-side caching (Default /
-BCAST / OPTIN, standalone and cluster) + fuzz + CI + docs.
-Phases 0–8 closed on `main`; Phase 9 (connection pool) next.
-No 0.3.0 release yet — accumulated improvements live on `main`.
+**Status: alpha.** v0.2.0 is on opam; v0.3.0 is tagged and
+awaiting opam publish. Full core + cluster + batch (incl. WATCH
+guards + cross-slot `pfcount_cluster`) + client-side caching
+(Default / BCAST / OPTIN, standalone and cluster) + blocking
+pool (BLPOP / BRPOP / BLMOVE / XREAD BLOCK via a per-node lease
+pool) + AWS IAM auth (pure-OCaml SigV4 signer +
+auto-refreshing token provider for ElastiCache) + mTLS
+(client-cert constructor) + fuzz + CI + docs.
 
 ## Why
 
@@ -42,6 +43,9 @@ No Lwt compat layer. No legacy Redis support.
     WATCH, when *not* to use transactions.
   - [docs/pubsub.md](docs/pubsub.md) — regular + sharded pub/sub,
     auto-resubscribe, delivery guarantees.
+  - [docs/blocking-pool.md](docs/blocking-pool.md) — per-node lease
+    pool for `BLPOP` / `BRPOP` / `XREAD BLOCK` etc.; config knobs,
+    typed errors, topology-change behaviour.
   - [docs/tls.md](docs/tls.md) — system CAs, dev certs,
     observed overhead.
   - [docs/performance.md](docs/performance.md) — one-client model,
@@ -499,9 +503,11 @@ Four layers, bottom up:
 ## Pre-push gate
 
 `scripts/git-hooks/pre-push` runs `dune build`, the full test
-suite, the parser fuzz at 100 k iterations (strict), and a
-30-second stability fuzz (both standalone and, if up, the
-cluster) with a **zero-error threshold**. Set it up once:
+suite, the parser fuzz at 100 k iterations (strict), the
+blocking-pool stress test (1000 concurrent `BLPOP` callers,
+`max_per_node=100`), and a 30-second stability fuzz (both
+standalone and, if up, the cluster) with a **zero-error
+threshold**. Set it up once:
 
 ```sh
 bash scripts/install-git-hooks.sh
@@ -509,7 +515,9 @@ bash scripts/install-git-hooks.sh
 
 Override knobs:
 - `SKIP_FUZZ=1 git push` — skip fuzz steps (still runs build +
-  tests + parser fuzz).
+  tests + parser fuzz + stress).
+- `SKIP_STRESS=1 git push` — skip blocking-pool stress (still
+  runs everything else).
 - `SKIP_PRE_PUSH=1 git push` — emergency escape.
 - `FUZZ_SECONDS=60 git push` — longer fuzz window.
 
@@ -529,8 +537,10 @@ state:
   guards + cross-slot `pfcount_cluster`) + cluster typed helpers
 - ✅ Phase 8 — client-side caching (`CLIENT TRACKING` + LRU,
   Default / BCAST / OPTIN, standalone + cluster, server-invalidated)
-- ⏳ Phase 9 — connection pool + blocking pool
-- ⏳ Phase 10 — IAM + mTLS + secret-hygiene audit
+- ✅ Phase 9 — blocking pool (narrowed; Client_pool dropped — see
+  [ROADMAP.md](ROADMAP.md))
+- ✅ Phase 10 — IAM (SigV4 signer + 10-min refresh provider) +
+  mTLS (`Tls_config.with_client_cert`)
 - ⏳ Phase 11 — module support (valkey-json / -search / -bloom)
 - ⏳ Phase 12 — deep audit → 1.0.0 stable
 

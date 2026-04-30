@@ -448,10 +448,10 @@ rebased as a thin façade over atomic `Batch`, plus
 Concurrent atomic batches on one router are **now safe** — the
 router exposes a per-primary mutex (`atomic_lock_for_slot`) that
 serialises MULTI/EXEC blocks on the shared pinned connection.
-Non-atomic traffic bypasses it. A real connection pool (Phase 9)
-will later let atomic ops against the same primary run on
-different connections in parallel; the router's API doesn't
-change when that lands.
+Non-atomic traffic bypasses it. The `connections_per_node` knob
+on `Node_pool` lets atomic ops against the same primary run on
+different bundle connections in parallel; the router's API doesn't
+change when the bundle grows.
 
 
 
@@ -570,101 +570,202 @@ command) + Phase 2 (the testing rigour to trust the consistency).
 
 ---
 
-## Phase 9 — Connection pool
+## Phase 9 — Blocking pool ✅ shipped in 0.3.0
 
-**Goal.** `Client_pool.t` for apps that need more throughput than
-one multiplexed socket can deliver (i.e., CPU-bound on parsing or
-on one socket's server-side queueing).
+**Goal.** One narrow problem: serve `BLPOP`-class blocking
+commands without freezing the multiplexed socket. Nothing else.
+
+**Why this is the only pool we ship.** The original Phase 9 scope
+also promised a general-purpose `Client_pool.t` — N sub-clients
+with pick strategies — to scale throughput past one socket. That
+half has been **dropped**. The multiplexed `Client.t` already hits
+85–96 % of the pipelined-C-client ceiling at conc=100 on one socket
+(see [BENCHMARKS.md](BENCHMARKS.md)), and the `connections_per_node`
+knob on `Node_pool` is the right lever when parser CPU *is* the
+bottleneck — it grows the per-node bundle without introducing a
+second client abstraction, without duplicating CSC tracking
+subscriptions, and without competing with the router's slot
+dispatch. An exploratory round with a `Client_pool` prototype
+did not show a crossover on our bench rig, so we are not
+carrying the maintenance cost of a feature that can't defend
+its own numbers.
+
+The blocking half is a different problem and has to exist: a
+multiplexed FIFO can't carry a command that intentionally
+sleeps on the server. That's what `Blocking_pool` solves.
 
 **Scope.**
 
-- **`Client_pool.t`:** owns N `Client.t`. Pick strategy is
-  configurable:
-  - `Round_robin` — cycle.
-  - `Sticky_by_key` — hash the first arg to a sub-client; good
-    locality, keeps caches warm.
-  - `Least_loaded` — track per-client in-flight, pick minimum.
-  - Default: `Sticky_by_key`.
-- **Typed command wrappers** on the pool mirror `Client.t`'s —
-  `Client_pool.set t k v` picks a client then calls `Client.set`.
-- **Cluster-aware pool** — pool-of-pools? In cluster, each
-  sub-client is itself a cluster router with the full fleet.
-  Value comes from duplicating the CPU path, not the fleet.
-- **Blocking pool** — separate type `Blocking_pool.t` with
-  check-out semantics: `Blocking_pool.with_ blocking_pool
-  (fun c -> ... run blocking command on c ...)`. Cap on
-  simultaneous checkouts; queue behind cap.
-- **Benchmarks:**
-  - At what point does `Client_pool` beat single `Client.t`?
-  - Pick strategy comparison.
+- **`Blocking_pool.t`** — narrow per-node lease pool for
+  `BLPOP`, `BRPOP`, `BLMPOP`, `BLMOVE`, `BZPOPMIN`/`BZPOPMAX`,
+  `XREAD BLOCK`, `XREADGROUP BLOCK`. Each blocking call leases
+  an exclusive connection for its duration; on clean return
+  the conn goes back to idle, on any exception or cancellation
+  it's closed (blocking-command wire state is opaque).
+- **Dedicated-conn helpers for non-poolable commands** —
+  `WAIT` / `WAITAOF` can't route through the pool (they have to
+  land on the conn the preceding write landed on). `Client.with_dedicated_conn`
+  + `wait_replicas_on` / `wait_aof_on` cover that path.
+- **Topology hooks** — `Cluster_router.Config.topology_hooks`
+  expose `on_node_removed` / `on_node_refreshed` callbacks that
+  fire from the refresh fiber. `Client` threads them through to
+  `Blocking_pool.drain_node` / `refresh_node` so in-flight leases
+  are tagged stale and their conns are closed on return rather
+  than re-idled.
+- **Config surface** — `max_per_node` (default 0 = feature off),
+  `min_idle_per_node`, `borrow_timeout`, `on_exhaustion`
+  (`` `Block `` / `` `Fail_fast ``), `max_idle_age`. Typed errors:
+  `Pool_not_configured` / `Pool_exhausted` / `Borrow_timeout` /
+  `Node_gone` / `Connect_failed`.
+- **Deliberate constraints.** Pool conns never enable
+  `CLIENT TRACKING`, never participate in `MULTI`/`EXEC`, never
+  carry OPTIN CSC pair submits or ASK-redirect triples. One
+  blocking call per lease; generation-tagged; stale on any
+  topology diff.
+- **Tests.**
+  - Correctness matrix: happy-path, timeout, `Pool_not_configured`,
+    `Pool_exhausted`, `Borrow_timeout`, `Node_gone`, cross-slot
+    rejection in cluster, `Wait_needs_dedicated_conn` typed error,
+    failover-induced drain. ✅ shipped in
+    `test/test_blocking_pool_integration.ml` (14 tests).
+  - **Stress / success-criterion test** — still missing: 1000
+    concurrent `BLPOP` callers with `max_per_node = 100`,
+    bounded wait, no leaks, correct stats.
 
 **Deliverables.**
 
-- `lib/client_pool.ml` + `.mli`.
-- `lib/blocking_pool.ml` + `.mli`.
-- Bench matrix with pool sizes 1 / 4 / 16 / 64.
-- Example: `examples/09-pool/`.
+- `lib/blocking_pool.ml` + `.mli` ✅
+- `Client` wiring + dedicated-conn helpers ✅
+- Topology hooks ✅
+- Correctness test matrix ✅
+- Stress / success-criterion test ⏳
+- `docs/blocking-pool.md` guide ⏳
+- `examples/08-blocking-commands/` updated to demonstrate the
+  pool ✅
+- `Observability.observe_blocking_pool_metrics` OTel bridge
+  mirroring `observe_cache_metrics` ⏳
+- CHANGELOG entry for 0.3.0 ⏳
 
 **Success criteria.**
 
-- At conc=500 with 16 `Client_pool` sub-clients, our throughput
-  beats the single-client ceiling by ≥ 3×.
 - Blocking pool handles 1000 concurrent `BLPOP` callers with a
-  cap of 100 connections, bounded wait, no leaks.
+  cap of 100 connections, bounded wait, no leaks. Proven by a
+  run-in-CI stress test.
+- `Client.blpop` / `brpop` / `blmove` / `xread_block` /
+  `wait_replicas_on` each return the documented typed errors
+  on every failure path, covered by integration tests.
+- A topology refresh that removes or re-roles a node drains
+  / refreshes the corresponding bucket within one refresh
+  cycle, confirmed under a live failover.
 
-**Depends on.** Phase 6 (1.0 stability first), Phase 7 (pipelining
-primitive we can reuse).
+**Depends on.** Phase 6 (1.0 stability first), Phase 7 (the
+atomic-per-slot router lock the pool coexists with).
+
+**Explicitly out of scope (decision record).**
+
+- `Client_pool.t` with pick strategies (`Round_robin` /
+  `Sticky_by_key` / `Least_loaded`) and typed wrappers. Not
+  shipped. `connections_per_node` on `Node_pool` is the
+  supported throughput knob; it scales parser CPU and avoids
+  the second client abstraction, the CSC-subscription
+  duplication, and the pool-of-pools cluster ambiguity. If a
+  later benchmark shows a regime where a client-level pool
+  does beat single-client + bigger bundle by a meaningful
+  margin, this can be re-opened — but on evidence, not
+  speculation.
 
 ---
 
-## Phase 10 — IAM + authentication
+## Phase 10 — IAM + authentication ✅ shipped in 0.3.0
 
 **Goal.** First-class AWS IAM auth for ElastiCache-for-Valkey.
 Rotate tokens without app-code awareness. mTLS for self-managed
 clusters. No secrets in tests.
 
-**Scope.**
+**Landed.**
 
-- **IAM token provider:**
-  - Compute SigV4 signature for `elasticache:Connect` (the service
-    exposes an IAM-auth token endpoint; see AWS docs).
-  - Token TTL ~15 minutes; provider refreshes before expiry.
-  - Provider passes the token to `Connection` via a new
-    `?auth_provider : unit -> (user:string * password:string)`
-    hook that replaces static `user` / `password` in Config.
-- **Other providers:** generic interface so users can plug:
-  - AWS IAM (default implementation).
-  - Env var loaded at call time.
-  - HashiCorp Vault transit.
-  - Custom closure.
-- **Mutual TLS:**
-  - Extend `Tls_config.t` with `~client_cert` / `~client_key`
-    loader.
-  - Plumb into the `wrap_with_tls` call path.
-- **Hardcoded-secret audit:**
-  - Replace the `"pass"` literal in
-    `scripts/cluster-hosts-setup.sh` with a prompt / env-var
-    reader. Nothing in the repo hardcodes a production secret.
-  - `grep -i 'pass\|secret\|token\|key'` review, case by case.
-- **Tests:**
-  - IAM provider unit tests with a fake SigV4 signer.
-  - mTLS integration test with our own CA: generate client cert,
-    verify the server accepts.
+- **`Connection.Auth.provider`** — abstract auth-provider type
+  replacing the old static `(string * string) option`.
+  Constructors: `static`, `custom ~name`. Every handshake
+  (initial + reconnect) pulls fresh credentials from the
+  closure, so short-lived credentials flow in without
+  client-code changes.
+- **`Connection.refresh_auth`** — public helper that sends
+  `AUTH user password` on a live socket. On wire / server error
+  the connection is `interrupt`ed so the supervisor reconnects
+  with whatever the provider returns next.
+- **`Iam_credentials`** — thin wrapper for AWS access-key /
+  secret-key / optional session-token. `of_env` reads
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+  `AWS_SESSION_TOKEN`.
+- **`Iam_sigv4`** — pure-OCaml SigV4 signer for
+  `elasticache:Connect` tokens. Verified byte-exact against
+  AWS's published signing-key test vector; uses `Digestif`
+  (already a dep) for HMAC-SHA256 and SHA-256. No AWS SDK.
+- **`Iam_provider`** — stateful provider with a 10-minute
+  refresh fiber bound to an `Eio.Switch`. Signs eagerly on
+  `create`, then every `refresh_interval` seconds re-signs and
+  pushes `AUTH` to every registered connection via
+  `Connection.refresh_auth`. Prunes dead connections
+  automatically. Matches AWS's 15-minute TTL and ±5 min clock
+  skew window.
+- **`Client.connect_with_iam`** — convenience wrapper that
+  installs the provider's `auth_provider` on the handshake,
+  opens the connection bundle, and registers every live conn
+  with the provider. Unregisters on switch release.
+- **`Tls_config.with_client_cert`** — mTLS: server verified
+  against a CA PEM, client presents a cert + key. Plumbs
+  through to `Tls.Config.client ?certificates` in
+  `wrap_with_tls`. PEM inputs are string contents; error
+  messages are redacted (no cert bytes, just stage names).
+  Empty-cert-list inputs are rejected.
+- **`Observability`** — `connect_span` gains a
+  `valkey.auth.mode` attribute sourced from the provider's
+  name. New `record_auth_refresh_failure` emits a span event
+  under the active span on AUTH-refresh failure (stateless;
+  no counter added to `Observability`).
 
-**Deliverables.**
+**Dropped / revised from the original scope.**
 
-- `lib/auth/iam_provider.ml` (optional sub-package).
-- Connection.Config extended with auth provider.
-- `Tls_config` mTLS support.
-- `docs/security.md` expanded with IAM + mTLS recipes.
+- The "Other providers" bullet (env var / HashiCorp Vault /
+  custom closure) is covered generically by
+  `Connection.Auth.custom` — users build their own providers
+  against that interface. No per-backend first-party
+  implementations ship this pass; the surface is adequate.
+- The "`pass` literal in `scripts/cluster-hosts-setup.sh`"
+  audit item was **stale documentation** — the script never
+  contained such a literal (verified from git history). Docs
+  in `docs/security.md` have been rewritten to describe the
+  actual secret-hygiene posture.
 
-**Success criteria.**
+**Deliverables — shipped.**
+
+- `lib/iam_credentials.{ml,mli}`, `lib/iam_sigv4.{ml,mli}`,
+  `lib/iam_provider.{ml,mli}` (flat, same opam package).
+- `Connection.Auth` module + `refresh_auth` public API.
+- `Tls_config.with_client_cert`.
+- `Client.connect_with_iam`.
+- `docs/security.md` expanded with IAM + mTLS recipes;
+  `docs/tls.md` mTLS section replaces the
+  "not yet wired" stub.
+- Unit tests: SigV4 signing-key byte-exact against AWS
+  vector; provider refresh-fiber rotation; mTLS PEM parse +
+  rejection. Integration tests: `refresh_auth` same /
+  bad-password / rotated-password paths against live Valkey
+  ACL users.
+
+**Success criteria (met except as noted).**
 
 - A 6-hour connection against ElastiCache-for-Valkey via IAM
   survives at least one token rotation with zero user-visible
-  errors.
+  errors. *(Not CI-tested — requires a live AWS account.
+  Manual smoke binary documented in `docs/security.md`.)*
 - mTLS connects + handshakes cleanly; bad client cert rejected
-  with a typed error.
+  with a typed error. *(Pure-unit coverage in
+  `test/test_mtls_config.ml`; live-server integration against
+  an mTLS-required Valkey is deferred as follow-up
+  infrastructure — requires a custom `docker-compose.mtls.yml`
+  profile.)*
 
 **Depends on.** Phase 6 (production rollout needs a stable 1.0).
 

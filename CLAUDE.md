@@ -29,13 +29,18 @@ Every new OCaml, Eio, or ecosystem concept is explained before it's used. Pace i
 - RESP3 protocol only
 - Valkey 7.2+ features: hash field TTL, functions, streams w/ consumer groups, CLIENT NO-EVICT / TRACKING
 - Cluster with automatic topology refresh (MOVED/ASK)
-- Pipelining + connection pool as first-class
+- Pipelining as first-class; per-node multiplexed-connection
+  bundle (`connections_per_node`) for throughput; blocking-only
+  lease pool for `BLPOP`-class commands
 
 **Out:**
 - RESP2, Redis <7, Valkey <7.2
 - Lwt, Async backends
 - Sentinel
-- Blocking-connection APIs
+- One-connection-per-caller blocking clients (we serve blocking
+  commands via a narrow lease pool, not a synchronous socket)
+- General-purpose client pool with pick strategies (tried it, did
+  not beat single client + bigger per-node bundle; not shipping)
 - Legacy `EVAL` ergonomics (lead with Functions)
 
 ## Conventions
