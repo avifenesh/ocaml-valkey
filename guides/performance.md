@@ -51,16 +51,31 @@ writer fibers. You don't need a pool.
 
 **Open more than one `Client.t` only when you need:**
 
-- Dedicated connections for blocking commands (`BLPOP`, `BRPOP`,
-  `XREAD BLOCK`). A blocked command owns the connection until it
-  returns. If other commands share that client, they wait.
-- Dedicated connections for transactions (`MULTI`/`EXEC` on a
-  pinned connection). See [transactions.md](transactions.md).
 - Dedicated connections for pub/sub. The subscribe-mode
   connection can't be multiplexed; open a separate `Pubsub.t` or
   `Cluster_pubsub.t`.
 - Isolating latency classes. E.g., an interactive-traffic client
   vs. a background-batch client.
+
+For blocking commands (`BLPOP`, `BRPOP`, `BLMOVE`, `XREAD BLOCK`,
+...), you don't open a second client — you configure
+`Client.Config.blocking_pool` on the same `Client.t`. The pool
+leases an exclusive connection for each blocking call so the
+multiplexed FIFO keeps serving regular traffic. See
+[blocking-pool.md](blocking-pool.md) for config knobs, typed
+errors, and sizing guidance. `WAIT` / `WAITAOF` are the
+exception — they can't share a pool lease; use
+`Client.with_dedicated_conn` + `wait_replicas_on` /
+`wait_aof_on`.
+
+`MULTI`/`EXEC` transactions stay on the main multiplexed
+connection, serialised per-primary by the router's atomic lock;
+see [transactions.md](transactions.md).
+
+For CPU-bound workloads where one socket's reader fiber is the
+bottleneck, grow the per-node bundle via
+`Config.connections_per_node` instead of standing up a second
+`Client.t`.
 
 For regular `GET`/`SET`/`HSET`/etc., one client is enough.
 

@@ -66,10 +66,41 @@ usually also want to pass `AUTH` credentials — see the
 
 ## mTLS (client certificate)
 
-Not yet wired. The underlying `tls-eio` supports client certs;
-the integration is tracked under ROADMAP Phase 10. If you need
-it sooner, open an issue — the change is localised to
-`Tls_config` and `Connection.connect`.
+Use `Tls_config.with_client_cert` to present a client certificate
++ key during the TLS handshake; the server decides whether to
+enforce them via its own `tls-auth-clients yes` setting.
+
+```ocaml
+let ca_pem = In_channel.with_open_text "tls/ca.crt" In_channel.input_all in
+let cert_pem = In_channel.with_open_text "tls/client.crt" In_channel.input_all in
+let key_pem = In_channel.with_open_text "tls/client.key" In_channel.input_all in
+let tls =
+  match
+    Valkey.Tls_config.with_client_cert
+      ~server_name:"valkey.local"
+      ~ca_pem ~client_cert_pem:cert_pem ~client_key_pem:key_pem ()
+  with
+  | Ok t -> t
+  | Error msg -> failwith ("mTLS config: " ^ msg)
+in
+let config =
+  { Valkey.Connection.Config.default with tls = Some tls }
+in
+let conn =
+  Valkey.Connection.connect ~sw ~net ~clock ~config
+    ~host:"valkey.local" ~port:6379 ()
+in
+```
+
+PEM inputs are string contents, not file paths — the caller
+reads the files. Error messages are redacted and never include
+cert bytes; the stage (`ca_pem` / `client_cert_pem` /
+`client_key_pem`) is named so you can tell which input failed
+to decode.
+
+The existing non-mTLS constructors (`insecure`, `with_ca_cert`,
+`with_system_cas`) leave the client-cert slot empty, so server
+auth works as before without change.
 
 ## TLS renegotiation + reconnect
 

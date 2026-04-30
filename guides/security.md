@@ -61,34 +61,154 @@ A few pitfalls to know about:
   restricted ACLs. Test your subscribing ACL with an actual
   `SUBSCRIBE` — don't assume.
 
-## IAM
+## IAM (AWS ElastiCache)
 
-Not yet wired. Tracked under ROADMAP Phase 10 — IAM token-based
-auth (as used by AWS MemoryDB / ElastiCache IAM auth). If you
-need this before Phase 10, the change is localised to
-`Connection.Config.auth` — open an issue.
+AWS ElastiCache for Valkey supports IAM-token authentication
+instead of a static password; tokens are short-lived
+SigV4-presigned URLs. This library has a built-in, pure-OCaml
+SigV4 signer + refresh provider — no AWS SDK dependency.
+
+```ocaml
+(* 1. Credentials from your environment / config / Vault / … *)
+let creds =
+  match Valkey.Iam_credentials.of_env () with
+  | Ok c -> c
+  | Error msg -> failwith ("AWS creds: " ^ msg)
+in
+
+(* 2. Provider: signs an initial token + spawns a 10-minute
+      refresh fiber on [sw]. *)
+let iam =
+  Valkey.Iam_provider.create
+    ~sw ~clock
+    ~credentials:creds
+    ~config:(Valkey.Iam_provider.Config.default
+               ~user_id:"iam-user-01"
+               ~cluster_id:"my-cluster"
+               ~region:"us-east-1")
+in
+
+(* 3. Connect — IAM auth installed on the handshake, TLS is
+      required by ElastiCache. *)
+let tls =
+  Valkey.Tls_config.with_system_cas
+    ~server_name:"my-cluster.abc.cache.amazonaws.com" ()
+  |> Result.get_ok
+in
+let config =
+  { Valkey.Client.Config.default with
+    connection =
+      { Valkey.Connection.Config.default with tls = Some tls } }
+in
+let client =
+  Valkey.Client.connect_with_iam ~sw ~net ~clock ~config ~iam
+    ~host:"my-cluster.abc.cache.amazonaws.com" ~port:6379 ()
+in
+(* Use [client] normally — the 10-minute refresh fiber pushes
+   fresh tokens in place without disturbing the socket; on AUTH
+   failure the connection falls through to the reconnect
+   supervisor, which rehandshakes with a freshly-signed token. *)
+```
+
+### Cluster mode
+
+ElastiCache serverless and cluster-mode replication groups both
+expose a single configuration endpoint; you wire the IAM provider
+into `Cluster_router.Config` and the library takes care of every
+shard connection — including any node that appears later via
+topology refresh — from the same provider:
+
+```ocaml
+let iam = (* as above *) in
+let cluster_cfg =
+  let base = Valkey.Cluster_router.Config.default ~seeds in
+  Valkey.Client.install_iam_on_cluster_config base iam
+  (* IAM provider now installed on
+     [base.connection.handshake.auth]. *)
+in
+let router =
+  match Valkey.Cluster_router.create ~sw ~net ~clock ~config:cluster_cfg ()
+  with
+  | Ok r -> r
+  | Error e -> failwith ("cluster router: " ^ e)
+in
+let client =
+  Valkey.Client.from_router_with_iam
+    ~sw ~net ~clock ~config:Valkey.Client.Config.default
+    ~iam router
+in
+(* Use [client] normally. The provider's refresh fiber walks
+   [Router.all_connections router] on every tick, so new nodes
+   that join via topology refresh get AUTH-pushed too. *)
+```
+
+Protocol constraints the library enforces for you:
+- TLS is mandatory — ElastiCache rejects IAM over plaintext.
+- The ElastiCache `user-id` and `user-name` must be identical
+  (lowercase); the provider passes it through verbatim.
+- Tokens have a 15-minute TTL and the server tolerates ±5 min
+  of clock skew — the 10-minute refresh cadence is well inside
+  both windows.
+- The 12-hour server-side auto-disconnect is orthogonal — when
+  it fires, the Connection's reconnect supervisor re-handshakes
+  with a freshly-signed token from the same provider.
+
+See `docs/tls.md` for TLS details and `Valkey.Iam_provider` in
+the odoc for the full provider surface.
+
+### Smoke-testing against a real ElastiCache cluster
+
+`bin/iam_smoke/` is a standalone binary for manually verifying
+the IAM path end-to-end against your own ElastiCache for Valkey
+deployment. Not wired into CI; run it yourself when you want
+proof-of-life:
+
+```sh
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1
+export ELASTICACHE_HOST=my-cluster.abc.cache.amazonaws.com
+export ELASTICACHE_CLUSTER_ID=my-cluster
+export ELASTICACHE_USER_ID=iam-user-01
+# Optional:
+# export AWS_SESSION_TOKEN=...           # STS / IRSA case
+# export SMOKE_DURATION_SECONDS=900      # 15 min — crosses one refresh
+# export IAM_REFRESH_INTERVAL=600        # default 10 min
+# export SMOKE_OPS_PER_SECOND=50
+
+dune exec bin/iam_smoke/iam_smoke.exe
+```
+
+The binary runs a `SET` every ~20 ms against a throwaway key,
+watches the cached token rotate via `Iam_provider.current_token`,
+and reports op success/error counts plus the number of token
+rotations observed. Exits 0 on success; non-zero on failing op
+or zero-rotation runs long enough to cross a refresh boundary.
 
 ## Secrets in the repo
 
-There's currently one `"pass"` string literal in
-`scripts/cluster-hosts-setup.sh` — that's the sudo password for
-a local dev VM, not production. It's flagged in AUDIT.md for
-removal during Phase 10.
+No production secrets land here. A grep sweep
+(`grep -riE '(password|token|secret|api_?key)\s*[:=]\s*"[^"]+"'`)
+over `scripts/`, `lib/`, `test/`, and `bin/` returns zero hits
+for production-shaped secret literals. Test fixtures use inline
+throwaway passwords set via `ACL SETUSER` and deleted in
+teardown — never hardcoded elsewhere.
 
-No production secrets should ever land in this repo. Standard
-rule: `.env` files are gitignored; CI secrets live in the
-provider's secret store.
+Standard rule: `.env` files are gitignored; CI secrets live in
+the provider's secret store.
 
 ## TLS — specifics
 
 See [tls.md](tls.md) for the full picture. Key do's and don'ts:
 
-- ✅ Use `system_cas ()` against services with publicly-signed
-  certs (ElastiCache, hosted Valkey).
-- ✅ Use `from_pem_file` with your private CA for internal
-  clusters.
-- ❌ Never use `no_verification` in production. It disables
-  MITM protection entirely.
+- ✅ Use `Tls_config.with_system_cas ()` against services with
+  publicly-signed certs (ElastiCache, hosted Valkey).
+- ✅ Use `Tls_config.with_ca_cert` with your private CA for
+  internal clusters.
+- ✅ Use `Tls_config.with_client_cert` for mTLS (see
+  [tls.md](tls.md)).
+- ❌ Never use `Tls_config.insecure` in production. It disables
+  certificate verification entirely.
 - ❌ Don't pin to specific cipher suites unless you know why —
   `ocaml-tls`'s defaults are current.
 
