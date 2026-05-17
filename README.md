@@ -474,14 +474,14 @@ docker compose up -d
 sudo bash scripts/cluster-hosts-setup.sh     # one-time: /etc/hosts entries
 docker compose -f docker-compose.cluster.yml up -d
 
-# Optional: start Valkey Bundle modules on :6381 for Search/JSON/Bloom tests
+# Start Valkey Bundle modules on :6381 for Search/JSON/Bloom integration tests
 docker compose -f docker-compose.search.yml up -d
 
 # Build everything + pure-unit tests (no server needed)
 dune build
 EIO_BACKEND=posix dune runtest
 
-# Full integration suite (needs the docker services above)
+# Full integration suite (needs standalone + module services; exercises cluster if started)
 EIO_BACKEND=posix \
   VALKEY_SEARCH_PORT=6381 VALKEY_JSON_PORT=6381 VALKEY_BLOOM_PORT=6381 \
   dune exec test/run_tests.exe
