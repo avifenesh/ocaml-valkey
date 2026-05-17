@@ -629,27 +629,35 @@ let decode_fields = decode_pairs "FT.SEARCH"
 
 let decode_search ~options = function
   | R.Array (R.Integer total :: rest) ->
+      let no_fields =
+        options.no_content ||
+        (match options.return_fields with Some [] -> true | _ -> false)
+      in
       let rec loop acc = function
         | [] -> Ok { total; documents = List.rev acc }
         | key :: tail ->
             let* key = string_of_resp "FT.SEARCH key" key in
-            if options.no_content ||
-               (match options.return_fields with Some [] -> true | _ -> false)
-            then
-              loop ({ key; sort_key = None; fields = [] } :: acc) tail
+            if no_fields then
+              if options.with_sort_keys then
+                match tail with
+                | sort_key :: tail ->
+                    loop ({ key; sort_key = Some sort_key; fields = [] } :: acc) tail
+                | [] -> Error (protocol_violation "FT.SEARCH" (R.Array rest))
+              else
+                loop ({ key; sort_key = None; fields = [] } :: acc) tail
             else if options.with_sort_keys then
               (match tail with
-               | sort_key :: R.Array fields :: tail ->
-                   let* fields = decode_fields (R.Array fields) in
+               | sort_key :: (R.Array _ | R.Map _ as field_reply) :: tail ->
+                   let* fields = decode_fields field_reply in
                    loop ({ key; sort_key = Some sort_key; fields } :: acc) tail
-               | R.Array fields :: tail ->
-                   let* fields = decode_fields (R.Array fields) in
+               | (R.Array _ | R.Map _ as field_reply) :: tail ->
+                   let* fields = decode_fields field_reply in
                    loop ({ key; sort_key = None; fields } :: acc) tail
                | _ -> Error (protocol_violation "FT.SEARCH" (R.Array rest)))
             else
               (match tail with
-               | R.Array fields :: tail ->
-                   let* fields = decode_fields (R.Array fields) in
+               | (R.Array _ | R.Map _ as field_reply) :: tail ->
+                   let* fields = decode_fields field_reply in
                    loop ({ key; sort_key = None; fields } :: acc) tail
                | _ -> Error (protocol_violation "FT.SEARCH" (R.Array rest)))
       in
@@ -666,8 +674,8 @@ let decode_aggregate = function
   | R.Array (header :: rows) ->
       let rec loop acc = function
         | [] -> Ok { header; rows = List.rev acc }
-        | R.Array fields :: rest ->
-            let* fields = decode_pairs "FT.AGGREGATE" (R.Array fields) in
+        | (R.Array _ | R.Map _ as field_reply) :: rest ->
+            let* fields = decode_pairs "FT.AGGREGATE" field_reply in
             loop (fields :: acc) rest
         | other :: _ -> Error (protocol_violation "FT.AGGREGATE" other)
       in

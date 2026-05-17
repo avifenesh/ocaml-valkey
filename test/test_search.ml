@@ -144,6 +144,34 @@ let test_decode_search_no_content () =
   | Ok _ -> Alcotest.fail "unexpected no-content result"
   | Error e -> Alcotest.failf "decode no-content: %a" E.pp e
 
+let test_decode_search_no_content_with_sort_keys () =
+  let options =
+    { S.default_search_options with
+      no_content = true;
+      with_sort_keys = true;
+    }
+  in
+  let reply =
+    R.Array
+      [ R.Integer 2L;
+        R.Bulk_string "doc:1";
+        R.Bulk_string "#1869";
+        R.Bulk_string "doc:2";
+        R.Bulk_string "#2020";
+      ]
+  in
+  match S.For_testing.decode_search ~options reply with
+  | Ok
+      { total = 2L;
+        documents =
+          [ { key = "doc:1"; sort_key = Some (R.Bulk_string "#1869"); fields = [] };
+            { key = "doc:2"; sort_key = Some (R.Bulk_string "#2020"); fields = [] };
+          ];
+      } ->
+      ()
+  | Ok _ -> Alcotest.fail "unexpected no-content sort-key result"
+  | Error e -> Alcotest.failf "decode no-content sort keys: %a" E.pp e
+
 let test_decode_search_with_sort_keys () =
   let options =
     { S.default_search_options with
@@ -164,6 +192,28 @@ let test_decode_search_with_sort_keys () =
       ()
   | Ok _ -> Alcotest.fail "expected decoded sort key"
   | Error e -> Alcotest.failf "decode sort key: %a" E.pp e
+
+let test_decode_search_resp3_map_fields () =
+  let reply =
+    R.Array
+      [ R.Integer 1L;
+        R.Bulk_string "doc:1";
+        R.Map
+          [ R.Bulk_string "title", R.Bulk_string "war and peace";
+            R.Bulk_string "year", R.Bulk_string "1869";
+          ];
+      ]
+  in
+  match S.For_testing.decode_search ~options:S.default_search_options reply with
+  | Ok { total = 1L; documents = [ { key = "doc:1"; fields; _ } ] } ->
+      Alcotest.(check int) "map fields" 2 (List.length fields);
+      Alcotest.(check (option string)) "title"
+        (Some "war and peace")
+        (match List.assoc_opt "title" fields with
+         | Some (R.Bulk_string s) -> Some s
+         | _ -> None)
+  | Ok _ -> Alcotest.fail "unexpected RESP3 map search result"
+  | Error e -> Alcotest.failf "decode map fields: %a" E.pp e
 
 let test_decode_search_rejects_odd_fields () =
   let reply =
@@ -239,6 +289,27 @@ let test_aggregate_args_and_decode () =
   | Ok _ -> Alcotest.fail "unexpected aggregate result"
   | Error e -> Alcotest.failf "aggregate decode: %a" E.pp e
 
+let test_decode_aggregate_resp3_map_rows () =
+  let reply =
+    R.Array
+      [ R.Integer 1L;
+        R.Map
+          [ R.Bulk_string "author", R.Bulk_string "modern";
+            R.Bulk_string "count", R.Integer 3L;
+          ];
+      ]
+  in
+  match S.For_testing.decode_aggregate reply with
+  | Ok { header = R.Integer 1L; rows = [ row ] } ->
+      Alcotest.(check int) "map row fields" 2 (List.length row);
+      Alcotest.(check (option int64)) "count"
+        (Some 3L)
+        (match List.assoc_opt "count" row with
+         | Some (R.Integer n) -> Some n
+         | _ -> None)
+  | Ok _ -> Alcotest.fail "unexpected RESP3 map aggregate result"
+  | Error e -> Alcotest.failf "aggregate map decode: %a" E.pp e
+
 let tests =
   [ Alcotest.test_case "FT.CREATE args cover schema options" `Quick
       test_create_args_full_schema;
@@ -250,12 +321,18 @@ let tests =
       test_decode_search_content;
     Alcotest.test_case "decode FT.SEARCH NOCONTENT" `Quick
       test_decode_search_no_content;
+    Alcotest.test_case "decode FT.SEARCH NOCONTENT WITHSORTKEYS" `Quick
+      test_decode_search_no_content_with_sort_keys;
     Alcotest.test_case "decode FT.SEARCH WITHSORTKEYS" `Quick
       test_decode_search_with_sort_keys;
+    Alcotest.test_case "decode FT.SEARCH RESP3 map fields" `Quick
+      test_decode_search_resp3_map_fields;
     Alcotest.test_case "decode rejects odd field arrays" `Quick
       test_decode_search_rejects_odd_fields;
     Alcotest.test_case "decode FT.INFO raw pairs" `Quick
       test_info_raw_decoding;
     Alcotest.test_case "FT.AGGREGATE args and decode" `Quick
       test_aggregate_args_and_decode;
+    Alcotest.test_case "decode FT.AGGREGATE RESP3 map rows" `Quick
+      test_decode_aggregate_resp3_map_rows;
   ]

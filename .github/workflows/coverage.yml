@@ -80,7 +80,7 @@ jobs:
         run: |
           opam exec -- bisect-ppx-report html \
             --coverage-path . \
-            --source-path lib \
+            --source-path . \
             -o coverage-html
 
       - name: Compute coverage percentage
