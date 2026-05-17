@@ -386,9 +386,9 @@ rejected its test setup). A public announcement lands.
       Pubsub, Cluster_pubsub, Named_commands, Command_spec).
     - `valkey-tls` — optional TLS support via ocaml-tls.
     - module wrappers live in the core `valkey` package for now:
-      `Valkey.Search` and `Valkey.Json` have landed; Bloom remains
-      pending (Phase 11). A later package split can still move these
-      into separate opam packages if install size justifies it.
+      `Valkey.Search`, `Valkey.Json`, and `Valkey.Bloom` have
+      landed. A later package split can still move these into
+      separate opam packages if install size justifies it.
   - `dune-project` pins lang + package metadata.
   - `dune build @install` + `opam-lint` pass clean.
 - **Versioning policy (SemVer, opam style):**
@@ -795,12 +795,14 @@ don't have to reach for raw `exec` to use them.
   - Typed schema DSL for `FT.CREATE` index definitions.
   - Typed search-result decoder.
   - Rank / sort / limit argument builders.
-- **Bloom** — probabilistic filters:
-  - `Bloom.*` (add / exists / mexists / insert).
-  - `Cuckoo.*`.
-  - `TDigest.*`.
-  - `TopK.*`.
-  - `Cms.*` (count-min sketch).
+- **`Valkey.Bloom`** — Bloom filters:
+  - `Bloom.reserve`, `add`, `madd`, `exists`, `mexists`,
+    `insert`, `card`, `info`, `info_raw`, `info_value`, and
+    `load`.
+  - Cuckoo, TopK, TDigest, and count-min sketch commands are
+    deliberately outside this Bloom-filter slice unless a later
+    feature request expands Phase 11 to the full probabilistic
+    family.
 
 Each module:
 - Lives behind a small typed module with JSON/path/query strings
@@ -815,16 +817,18 @@ Each module:
   `examples/11-search/` and bundle-backed tests. ✅
 - `Valkey.Json` in `lib/json.{ml,mli}` with `examples/12-json/`
   and bundle-backed tests. ✅
-- Bloom-family wrappers, integration tests, and runnable example.
+- `Valkey.Bloom` in `lib/bloom.{ml,mli}` with
+  `examples/13-bloom/` and bundle-backed tests. ✅
 
 **Success criteria.**
 
 - `opam install valkey` exposes landed module wrappers without raw
   `exec` for common production commands.
-- JSON and Search wrappers cover the production commands available in
-  Valkey Bundle while intentionally excluding debug/internal commands.
-- Bloom-family wrappers get the same command-table, integration-test,
-  and runnable-example treatment before Phase 11 is marked complete.
+- JSON, Search, and Bloom wrappers cover the production commands
+  available in Valkey Bundle while intentionally excluding
+  debug/internal commands.
+- Bloom wrappers get the same command-table, integration-test, and
+  runnable-example treatment before Phase 11 is marked complete.
 
 **Depends on.** Phase 6 (package-split process established) +
 Phase 5 (examples exist to model after).

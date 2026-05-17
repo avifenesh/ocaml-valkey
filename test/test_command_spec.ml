@@ -152,6 +152,27 @@ let test_json_mget_multi_key_read () =
   | Some _ -> Alcotest.fail "JSON.MGET should use first key slot"
   | None -> Alcotest.fail "JSON.MGET should be single-reply"
 
+let test_bf_exists_readonly_by_slot () =
+  let args = args_of_list [ "BF.EXISTS"; "bf:users"; "ada" ] in
+  match CS.target_and_rf RF.Prefer_replica args with
+  | Some (T.By_slot s, RF.Prefer_replica) when s = slot_of "bf:users" -> ()
+  | Some _ -> Alcotest.fail "BF.EXISTS should preserve replica reads"
+  | None -> Alcotest.fail "BF.EXISTS should be single-reply"
+
+let test_bf_add_write_forces_primary () =
+  let args = args_of_list [ "BF.ADD"; "bf:users"; "ada" ] in
+  match CS.target_and_rf RF.Prefer_replica args with
+  | Some (T.By_slot s, RF.Primary) when s = slot_of "bf:users" -> ()
+  | Some _ -> Alcotest.fail "BF.ADD should force Primary"
+  | None -> Alcotest.fail "BF.ADD should be single-reply"
+
+let test_bf_mexists_readonly_by_slot () =
+  let args = args_of_list [ "BF.MEXISTS"; "bf:users"; "ada"; "grace" ] in
+  match CS.target_and_rf RF.Prefer_replica args with
+  | Some (T.By_slot s, RF.Prefer_replica) when s = slot_of "bf:users" -> ()
+  | Some _ -> Alcotest.fail "BF.MEXISTS should use filter key"
+  | None -> Alcotest.fail "BF.MEXISTS should be single-reply"
+
 let test_client_exec_fan_primary_fallback_forces_primary () =
   let seen = ref None in
   let exec ?timeout:_ target rf args =
@@ -231,6 +252,12 @@ let tests =
       test_json_set_write_forces_primary;
     Alcotest.test_case "JSON.MGET: multi-key first slot" `Quick
       test_json_mget_multi_key_read;
+    Alcotest.test_case "BF.EXISTS: readonly key at 1" `Quick
+      test_bf_exists_readonly_by_slot;
+    Alcotest.test_case "BF.ADD: write key at 1" `Quick
+      test_bf_add_write_forces_primary;
+    Alcotest.test_case "BF.MEXISTS: readonly key at 1" `Quick
+      test_bf_mexists_readonly_by_slot;
     Alcotest.test_case "Client.exec Fan_primaries fallback forces Primary"
       `Quick test_client_exec_fan_primary_fallback_forces_primary;
   ]

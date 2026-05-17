@@ -33,6 +33,7 @@ walk-through.
 | 10 | `10-batch/` | Cluster-aware bulk/scatter/atomic batch workflows | cluster |
 | 11 | `11-search/` | `FT.CREATE`, `FT.SEARCH`, `FT.AGGREGATE` through `Valkey.Search` | Valkey Bundle |
 | 12 | `12-json/` | JSON document reads, multi-key writes, mutations, and `JSON.RESP` through `Valkey.Json` | Valkey Bundle |
+| 13 | `13-bloom/` | Bloom filter add/check/insert/info workflows through `Valkey.Bloom` | Valkey Bundle |
 
 ## Convention going forward
 

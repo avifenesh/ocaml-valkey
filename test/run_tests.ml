@@ -60,10 +60,13 @@ let () =
         Test_admin_family.tests;
       "json (pure)", Test_json.tests;
       "search (pure)", Test_search.tests;
+      "bloom (pure)", Test_bloom.tests;
       "json (optional valkey-bundle on :6381)",
         Test_json_integration.tests;
       "search (optional valkey-bundle on :6381)",
         Test_search_integration.tests;
+      "bloom (optional valkey-bundle on :6381)",
+        Test_bloom_integration.tests;
       "cluster (needs docker compose -f docker-compose.cluster.yml)",
         Test_cluster.tests;
       "command_spec property (needs docker compose -f docker-compose.cluster.yml)",

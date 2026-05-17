@@ -23,6 +23,7 @@ module Cluster_pubsub = Cluster_pubsub
 module Named_commands = Named_commands
 module Json = Json
 module Search = Search
+module Bloom = Bloom
 module Cache = Cache
 module Client_cache = Client_cache
 module Invalidation = Invalidation

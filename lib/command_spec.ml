@@ -403,6 +403,17 @@ let one_word : (string * t) list =
     "JSON.TOGGLE", wk 1;
     "JSON.TYPE", rk 1;
 
+    (* ---------- Valkey Bloom module ---------- *)
+    "BF.ADD", wk 1;
+    "BF.CARD", rk 1;
+    "BF.EXISTS", rk 1;
+    "BF.INFO", rk 1;
+    "BF.INSERT", wk 1;
+    "BF.LOAD", wk 1;
+    "BF.MADD", wk 1;
+    "BF.MEXISTS", rk 1;
+    "BF.RESERVE", wk 1;
+
     (* ---------- scripting ---------- *)
     "EVAL", Single_key { key_index = 3; readonly = false };
     "EVALSHA", Single_key { key_index = 3; readonly = false };

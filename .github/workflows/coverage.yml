@@ -75,7 +75,8 @@ jobs:
           docker compose -f docker-compose.search.yml up -d
           for i in $(seq 1 45); do
             if docker compose -f docker-compose.search.yml exec -T valkey-bundle valkey-cli -p 6379 FT._LIST >/dev/null 2>&1 \
-              && docker compose -f docker-compose.search.yml exec -T valkey-bundle valkey-cli -p 6379 JSON.TYPE __missing__ >/dev/null 2>&1; then
+              && docker compose -f docker-compose.search.yml exec -T valkey-bundle valkey-cli -p 6379 JSON.TYPE __missing__ >/dev/null 2>&1 \
+              && docker compose -f docker-compose.search.yml exec -T valkey-bundle valkey-cli -p 6379 BF.CARD __missing__ >/dev/null 2>&1; then
               echo "module bundle up"; break
             fi
             if [ "$i" = "45" ]; then
@@ -90,7 +91,7 @@ jobs:
           # Wipe any stale bisect files from previous runs.
           find . -name '*.coverage' -delete || true
           opam exec -- dune runtest --instrument-with bisect_ppx --force
-          EIO_BACKEND=posix VALKEY_SEARCH_PORT=6381 VALKEY_JSON_PORT=6381 \
+          EIO_BACKEND=posix VALKEY_SEARCH_PORT=6381 VALKEY_JSON_PORT=6381 VALKEY_BLOOM_PORT=6381 \
             opam exec -- dune exec --instrument-with bisect_ppx --force \
             test/run_tests.exe
 
