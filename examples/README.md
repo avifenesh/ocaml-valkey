@@ -32,6 +32,7 @@ walk-through.
 | 09 | `09-leaderboard/` | Sorted-set leaderboard with `ZADD` / `ZINCRBY` / `ZRANGEBYSCORE` / pagination | standalone |
 | 10 | `10-batch/` | Cluster-aware bulk/scatter/atomic batch workflows | cluster |
 | 11 | `11-search/` | `FT.CREATE`, `FT.SEARCH`, `FT.AGGREGATE` through `Valkey.Search` | Valkey Bundle |
+| 12 | `12-json/` | JSON document reads, multi-key writes, mutations, and `JSON.RESP` through `Valkey.Json` | Valkey Bundle |
 
 ## Convention going forward
 

@@ -293,9 +293,13 @@ implementing.
       typed `FT.CREATE` schema builders, `FT.SEARCH`,
       `FT.AGGREGATE`, `FT.INFO`, `FT._LIST`, and `FT.DROPINDEX`,
       plus bundle-backed integration coverage and
-      `examples/11-search/`. `valkey-json` and `valkey-bloom`
-      remain pending. Per-module opam package or a single
-      `valkey-modules` meta?
+      `examples/11-search/`. `Valkey.Json` has landed for
+      production JSON commands including `JSON.MSET`, object, array,
+      string, and number mutations, `JSON.FORGET`, `JSON.CLEAR`, and raw
+      `JSON.RESP`, with pure tests, bundle-backed integration
+      coverage, and `examples/12-json/`. `valkey-bloom` remains
+      pending. Per-module opam package or a single `valkey-modules`
+      meta?
 - [ ] **Phase 12 — Full audit pass.** Before 1.0.
 
 ### CSC follow-ups (optional)

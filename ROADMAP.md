@@ -385,8 +385,10 @@ rejected its test setup). A public announcement lands.
     - `valkey` — core (Client, Router, Cluster_router, Transaction,
       Pubsub, Cluster_pubsub, Named_commands, Command_spec).
     - `valkey-tls` — optional TLS support via ocaml-tls.
-    - `valkey-search`, `valkey-json`, `valkey-bloom` — modules
-      (Phase 11). Released alongside or after 1.0.
+    - module wrappers live in the core `valkey` package for now:
+      `Valkey.Search` and `Valkey.Json` have landed; Bloom remains
+      pending (Phase 11). A later package split can still move these
+      into separate opam packages if install size justifies it.
   - `dune-project` pins lang + package metadata.
   - `dune build @install` + `opam-lint` pass clean.
 - **Versioning policy (SemVer, opam style):**
@@ -771,25 +773,29 @@ clusters. No secrets in tests.
 
 ---
 
-## Phase 11 — Module support (JSON / Search / Bloom)
+## Phase 11 — Module support (JSON / Search / Bloom) ⏳ in progress
 
 **Goal.** Typed wrappers for the three big Valkey modules so users
 don't have to reach for raw `exec` to use them.
 
-**Scope (one optional sub-package per module):**
+**Scope:**
 
-- **`valkey-json`** — typed wrappers for `JSON.*`:
-  - `Json.get`, `set`, `del`, `arrappend`, `arrindex`, `arrlen`,
-    `arrtrim`, `numincrby`, `objkeys`, `type`.
+- **`Valkey.Json`** — typed wrappers for production `JSON.*`
+  commands in the core package:
+  - `Json.get`, `set`, `del`, `forget`, `clear`, `mget`, `mset`,
+    `arr_append`, `arr_index`, `arr_insert`, `arr_len`, `arr_pop`,
+    `arr_trim`, `num_incr_by`, `num_mult_by`, `obj_keys`,
+    `obj_len`, `strlen`, `str_append`, `toggle`, `type_of`, and
+    raw `resp`.
   - JSON-path strings passed through.
   - Reply decoding: keep the raw JSON as `string`; let the caller
     parse with whatever JSON lib they prefer (yojson, jsonaf, etc.).
-- **`valkey-search`** — `FT.CREATE`, `FT.SEARCH`, `FT.AGGREGATE`,
-  `FT.INFO`, `FT.DROPINDEX`:
+- **`Valkey.Search`** — `FT.CREATE`, `FT.SEARCH`, `FT.AGGREGATE`,
+  `FT.INFO`, `FT._LIST`, `FT.DROPINDEX`:
   - Typed schema DSL for `FT.CREATE` index definitions.
   - Typed search-result decoder.
   - Rank / sort / limit argument builders.
-- **`valkey-bloom`** — probabilistic filters:
+- **Bloom** — probabilistic filters:
   - `Bloom.*` (add / exists / mexists / insert).
   - `Cuckoo.*`.
   - `TDigest.*`.
@@ -797,23 +803,28 @@ don't have to reach for raw `exec` to use them.
   - `Cms.*` (count-min sketch).
 
 Each module:
-- Own `lib/module_<name>/`.
-- Own `.opam` so users pick only what they need.
-- Own integration tests that need a Valkey build with the module
-  loaded — CI fixture via docker image with modules preinstalled.
+- Lives behind a small typed module with JSON/path/query strings
+  passed through where Valkey owns the syntax.
+- Has integration tests that need a Valkey build with the module
+  loaded; the local/CI fixture uses Valkey Bundle.
+- Has a runnable example under `examples/`.
 
 **Deliverables.**
 
-- `valkey-json.opam`, `valkey-search.opam`, `valkey-bloom.opam`.
-- Three integration test suites.
-- Three example programs (`examples/10-json/`, `11-search/`,
-  `12-bloom/`).
+- `Valkey.Search` in `lib/search.{ml,mli}` with
+  `examples/11-search/` and bundle-backed tests. ✅
+- `Valkey.Json` in `lib/json.{ml,mli}` with `examples/12-json/`
+  and bundle-backed tests. ✅
+- Bloom-family wrappers, integration tests, and runnable example.
 
 **Success criteria.**
 
-- `opam install valkey-json` works; typed wrappers cover the
-  JSON module's documented commands.
-- Same for Search and Bloom.
+- `opam install valkey` exposes landed module wrappers without raw
+  `exec` for common production commands.
+- JSON and Search wrappers cover the production commands available in
+  Valkey Bundle while intentionally excluding debug/internal commands.
+- Bloom-family wrappers get the same command-table, integration-test,
+  and runnable-example treatment before Phase 11 is marked complete.
 
 **Depends on.** Phase 6 (package-split process established) +
 Phase 5 (examples exist to model after).

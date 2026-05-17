@@ -1,4 +1,5 @@
 module C = Valkey.Client
+module J = Valkey.Json
 module S = Valkey.Search
 module R = Valkey.Resp3
 module E = Valkey.Connection.Error
@@ -65,14 +66,12 @@ let drop_ignoring_missing c index =
     when contains ~needle:"not found" (Valkey.Error.to_string e) -> ()
   | Error e -> Alcotest.failf "cleanup FT.DROPINDEX: %a" err_pp e
 
-let expect_ok ctx = function
-  | Ok (R.Simple_string "OK") | Ok (R.Bulk_string "OK") -> ()
-  | Ok other -> Alcotest.failf "%s: unexpected %a" ctx R.pp other
-  | Error e -> Alcotest.failf "%s: %a" ctx err_pp e
-
 let json_set c key payload =
-  expect_ok ("JSON.SET " ^ key)
-    (C.custom c [| "JSON.SET"; key; "$"; payload |])
+  match J.set c ~key payload with
+  | Ok true -> ()
+  | Ok false ->
+      Alcotest.failf "JSON.SET %s: condition prevented write" key
+  | Error e -> Alcotest.failf "JSON.SET %s: %a" key err_pp e
 
 let float32_blob values =
   let bytes = Bytes.create (List.length values * 4) in

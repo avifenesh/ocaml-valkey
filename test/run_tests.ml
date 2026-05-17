@@ -58,6 +58,8 @@ let () =
         Test_client_admin.tests;
       "admin family (needs docker valkey :6379)",
         Test_admin_family.tests;
+      "json (optional valkey-bundle on :6381)",
+        Test_json_integration.tests;
       "search (optional valkey-bundle on :6381)",
         Test_search_integration.tests;
       "cluster (needs docker compose -f docker-compose.cluster.yml)",

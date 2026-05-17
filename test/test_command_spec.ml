@@ -127,6 +127,31 @@ let test_watch_multi_key () =
   | Some (T.By_slot s, _) when s = slot_of "a" -> ()
   | _ -> Alcotest.fail "WATCH: multi-key, slot of first"
 
+let test_json_get_readonly_by_slot () =
+  let args = args_of_list [ "JSON.GET"; "user:42"; "$.name" ] in
+  match CS.target_and_rf RF.Prefer_replica args with
+  | Some (T.By_slot s, RF.Prefer_replica) when s = slot_of "user:42" -> ()
+  | Some _ -> Alcotest.fail "JSON.GET should preserve replica reads"
+  | None -> Alcotest.fail "JSON.GET should be single-reply"
+
+let test_json_set_write_forces_primary () =
+  let args =
+    args_of_list [ "JSON.SET"; "user:42"; "$"; "{\"name\":\"ada\"}" ]
+  in
+  match CS.target_and_rf RF.Prefer_replica args with
+  | Some (T.By_slot s, RF.Primary) when s = slot_of "user:42" -> ()
+  | Some _ -> Alcotest.fail "JSON.SET should force Primary"
+  | None -> Alcotest.fail "JSON.SET should be single-reply"
+
+let test_json_mget_multi_key_read () =
+  let args =
+    args_of_list [ "JSON.MGET"; "{grp}:a"; "{grp}:b"; "$.name" ]
+  in
+  match CS.target_and_rf RF.Prefer_replica args with
+  | Some (T.By_slot s, RF.Prefer_replica) when s = slot_of "{grp}:a" -> ()
+  | Some _ -> Alcotest.fail "JSON.MGET should use first key slot"
+  | None -> Alcotest.fail "JSON.MGET should be single-reply"
+
 let test_client_exec_fan_primary_fallback_forces_primary () =
   let seen = ref None in
   let exec ?timeout:_ target rf args =
@@ -200,6 +225,12 @@ let tests =
       test_client_list_fan_all_nodes;
     Alcotest.test_case "WATCH: multi-key first slot" `Quick
       test_watch_multi_key;
+    Alcotest.test_case "JSON.GET: readonly key at 1" `Quick
+      test_json_get_readonly_by_slot;
+    Alcotest.test_case "JSON.SET: write key at 1" `Quick
+      test_json_set_write_forces_primary;
+    Alcotest.test_case "JSON.MGET: multi-key first slot" `Quick
+      test_json_mget_multi_key_read;
     Alcotest.test_case "Client.exec Fan_primaries fallback forces Primary"
       `Quick test_client_exec_fan_primary_fallback_forces_primary;
   ]

@@ -1,0 +1,425 @@
+module J = Valkey.Json
+module R = Valkey.Resp3
+module E = Valkey.Connection.Error
+module C = Valkey.Client
+module Router = Valkey.Router
+module T = Valkey.Router.Target
+module RF = Valkey.Router.Read_from
+
+let array_check name expected actual =
+  Alcotest.(check (list string)) name (Array.to_list expected)
+    (Array.to_list actual)
+
+let fake_client ?(reply = R.Null) ?(read_from = RF.Primary) () =
+  let seen = ref None in
+  let exec ?timeout:_ target rf args =
+    seen := Some (target, rf, Array.to_list args);
+    Ok reply
+  in
+  let exec_multi ?timeout:_ _fan _args = [] in
+  let pair ?timeout:_ _target _args1 _args2 =
+    Error (E.Terminal "unused")
+  in
+  let router =
+    Router.make ~exec ~exec_multi ~pair ~close:(fun () -> ())
+      ~primary:(fun () -> None)
+      ~connection_for_slot:(fun _ -> None)
+      ~endpoint_for_slot:(fun _ -> None)
+      ~endpoint_for_node:(fun ~node_id:_ -> None)
+      ~all_connections:(fun () -> [])
+      ~is_standalone:false
+      ~atomic_lock_for_slot:(fun _ -> Eio.Mutex.create ())
+  in
+  let config = { C.Config.default with read_from } in
+  (C.from_router ~config router, seen)
+
+let check_seen name ~key ~read_from ~args seen =
+  match !seen with
+  | Some (T.By_slot s, rf, got)
+    when s = Valkey.Slot.of_key key && rf = read_from && got = args ->
+      ()
+  | Some _ ->
+      Alcotest.fail
+        (name ^ " routed with unexpected target/read policy/args")
+  | None -> Alcotest.fail (name ^ " did not call fake router")
+
+let expect_invalid_arg name f =
+  match f () with
+  | exception Invalid_argument _ -> ()
+  | _ -> Alcotest.fail (name ^ " should reject invalid input")
+
+let test_set_args () =
+  let args =
+    J.For_testing.set_args ~path:"$.profile"
+      ~condition:J.If_missing ~key:"user:1"
+      "{\"name\":\"ada\"}"
+  in
+  array_check "JSON.SET args"
+    [| "JSON.SET"; "user:1"; "$.profile"; "{\"name\":\"ada\"}"; "NX" |]
+    args
+
+let test_get_args_with_format () =
+  let format : J.get_format =
+    { indent = Some "  ";
+      newline = Some "\n";
+      space = Some " ";
+      no_escape = true;
+    }
+  in
+  let args =
+    J.For_testing.get_args ~format
+      ~paths:[ "$.name"; "$.age" ] ~key:"user:1"
+  in
+  array_check "JSON.GET args"
+    [| "JSON.GET"; "user:1";
+       "INDENT"; "  ";
+       "NEWLINE"; "\n";
+       "SPACE"; " ";
+       "NOESCAPE";
+       "$.name"; "$.age";
+    |]
+    args
+
+let test_mget_args () =
+  let args =
+    J.For_testing.mget_args ~path:"$.name"
+      ~keys:[ "user:{1}:a"; "user:{1}:b" ]
+  in
+  array_check "JSON.MGET args"
+    [| "JSON.MGET"; "user:{1}:a"; "user:{1}:b"; "$.name" |]
+    args
+
+let test_arr_append_args () =
+  let args =
+    J.For_testing.arr_append_args ~path:"$.tags" ~key:"user:1"
+      [ "\"math\""; "\"logic\"" ]
+  in
+  array_check "JSON.ARRAPPEND args"
+    [| "JSON.ARRAPPEND"; "user:1"; "$.tags"; "\"math\""; "\"logic\"" |]
+    args
+
+let test_mset_args_and_empty_input () =
+  let key = "json:{1}:a" in
+  let client, seen = fake_client ~reply:(R.Simple_string "OK") () in
+  (match
+     J.mset client
+       [ { J.key; path = "$"; json = "{\"name\":\"ada\"}" };
+         { J.key = "json:{1}:b";
+           path = "$.profile";
+           json = "{\"active\":true}";
+         };
+       ]
+   with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "JSON.MSET: %a" E.pp e);
+  check_seen "JSON.MSET" ~key ~read_from:RF.Primary
+    ~args:
+      [ "JSON.MSET";
+        "json:{1}:a";
+        "$";
+        "{\"name\":\"ada\"}";
+        "json:{1}:b";
+        "$.profile";
+        "{\"active\":true}";
+      ]
+    seen;
+  expect_invalid_arg "JSON.MSET empty" (fun () ->
+      ignore (J.mset client []))
+
+let test_key_path_and_number_commands () =
+  let key = "json:1" in
+  let client, seen = fake_client ~reply:(R.Integer 1L) () in
+  (match J.forget client ~key ~path:"$.stale" with
+   | Ok 1 -> ()
+   | Ok n -> Alcotest.failf "unexpected JSON.FORGET count %d" n
+   | Error e -> Alcotest.failf "JSON.FORGET: %a" E.pp e);
+  check_seen "JSON.FORGET" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.FORGET"; key; "$.stale" ] seen;
+
+  let client, seen = fake_client ~reply:(R.Integer 2L) () in
+  (match J.clear client ~key with
+   | Ok 2 -> ()
+   | Ok n -> Alcotest.failf "unexpected JSON.CLEAR count %d" n
+   | Error e -> Alcotest.failf "JSON.CLEAR: %a" E.pp e);
+  check_seen "JSON.CLEAR" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.CLEAR"; key ] seen;
+
+  let client, seen = fake_client ~reply:(R.Bulk_string "[74]") () in
+  (match J.num_mult_by client ~key ~path:"$.age" 2.0 with
+   | Ok (Some "[74]") -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.NUMMULTBY payload"
+   | Error e -> Alcotest.failf "JSON.NUMMULTBY: %a" E.pp e);
+  check_seen "JSON.NUMMULTBY" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.NUMMULTBY"; key; "$.age"; "2" ] seen
+
+let test_array_commands () =
+  let key = "json:1" in
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Integer 3L ]) ()
+  in
+  (match
+     J.arr_insert client ~key ~path:"$.tags" ~index:1
+       [ "\"logic\"" ]
+   with
+   | Ok [ Some 3 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRINSERT result"
+   | Error e -> Alcotest.failf "JSON.ARRINSERT: %a" E.pp e);
+  check_seen "JSON.ARRINSERT" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRINSERT"; key; "$.tags"; "1"; "\"logic\"" ]
+    seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Bulk_string "\"logic\"" ]) ()
+  in
+  (match J.arr_pop client ~key ~path:"$.tags" ~index:1 with
+   | Ok [ Some "\"logic\"" ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRPOP result"
+   | Error e -> Alcotest.failf "JSON.ARRPOP: %a" E.pp e);
+  check_seen "JSON.ARRPOP" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRPOP"; key; "$.tags"; "1" ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Integer 1L ]) ()
+  in
+  (match J.arr_trim client ~key ~path:"$.tags" ~start:0 ~stop:0 with
+   | Ok [ Some 1 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRTRIM result"
+   | Error e -> Alcotest.failf "JSON.ARRTRIM: %a" E.pp e);
+  check_seen "JSON.ARRTRIM" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRTRIM"; key; "$.tags"; "0"; "0" ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Integer 0L ])
+      ~read_from:RF.Prefer_replica ()
+  in
+  (match
+     J.arr_index client ~key ~path:"$.tags" ~json:"\"math\""
+       ~start:0 ~stop:2
+   with
+   | Ok [ Some 0 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRINDEX result"
+   | Error e -> Alcotest.failf "JSON.ARRINDEX: %a" E.pp e);
+  check_seen "JSON.ARRINDEX" ~key ~read_from:RF.Prefer_replica
+    ~args:[ "JSON.ARRINDEX"; key; "$.tags"; "\"math\""; "0"; "2" ]
+    seen;
+
+  expect_invalid_arg "JSON.ARRAPPEND empty" (fun () ->
+      ignore (J.arr_append client ~key ~path:"$.tags" []));
+  expect_invalid_arg "JSON.ARRINSERT empty" (fun () ->
+      ignore (J.arr_insert client ~key ~path:"$.tags" ~index:0 []));
+  expect_invalid_arg "JSON.ARRINDEX stop without start" (fun () ->
+      ignore
+        (J.arr_index client ~key ~path:"$.tags" ~json:"\"math\""
+           ~stop:2))
+
+let test_string_object_and_resp_commands () =
+  let key = "json:1" in
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Integer 12L ]) ()
+  in
+  (match J.strlen client ~key ~path:"$.name" with
+   | Ok [ Some 12 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.STRLEN result"
+   | Error e -> Alcotest.failf "JSON.STRLEN: %a" E.pp e);
+  check_seen "JSON.STRLEN" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.STRLEN"; key; "$.name" ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Integer 13L ]) ()
+  in
+  (match J.str_append client ~key "\"!\"" with
+   | Ok [ Some 13 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.STRAPPEND result"
+   | Error e -> Alcotest.failf "JSON.STRAPPEND: %a" E.pp e);
+  check_seen "JSON.STRAPPEND" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.STRAPPEND"; key; "\"!\"" ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Integer 5L ])
+      ~read_from:RF.Prefer_replica ()
+  in
+  (match J.obj_len client ~key ~path:"$" with
+   | Ok [ Some 5 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.OBJLEN result"
+   | Error e -> Alcotest.failf "JSON.OBJLEN: %a" E.pp e);
+  check_seen "JSON.OBJLEN" ~key ~read_from:RF.Prefer_replica
+    ~args:[ "JSON.OBJLEN"; key; "$" ] seen;
+
+  let raw = R.Array [ R.Simple_string "{"; R.Simple_string "}" ] in
+  let client, seen = fake_client ~reply:raw () in
+  (match J.resp client ~key ~path:"$" with
+   | Ok reply when R.equal reply raw -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.RESP reply"
+   | Error e -> Alcotest.failf "JSON.RESP: %a" E.pp e);
+  check_seen "JSON.RESP" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.RESP"; key; "$" ] seen
+
+let test_decode_get_and_mget () =
+  (match J.For_testing.decode_get (R.Bulk_string "[{\"name\":\"ada\"}]") with
+   | Ok (Some s) ->
+       Alcotest.(check string) "get payload" "[{\"name\":\"ada\"}]" s
+   | Ok None -> Alcotest.fail "expected payload"
+   | Error e -> Alcotest.failf "decode get: %a" E.pp e);
+  (match
+     J.For_testing.decode_mget
+       (R.Array
+          [ R.Bulk_string "[\"ada\"]"; R.Null; R.Bulk_string "[\"grace\"]" ])
+   with
+   | Ok [ Some "[\"ada\"]"; None; Some "[\"grace\"]" ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected mget decode"
+   | Error e -> Alcotest.failf "decode mget: %a" E.pp e)
+
+let test_decode_type_and_lengths () =
+  (match
+     J.For_testing.decode_type
+       (R.Array [ R.Bulk_string "object"; R.Bulk_string "array" ])
+   with
+   | Ok [ Some "object"; Some "array" ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected type decode"
+   | Error e -> Alcotest.failf "decode type: %a" E.pp e);
+  (match
+     J.For_testing.decode_int_results "JSON.ARRLEN"
+       (R.Array [ R.Integer 2L; R.Null ])
+   with
+   | Ok [ Some 2; None ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected length decode"
+   | Error e -> Alcotest.failf "decode length: %a" E.pp e)
+
+let test_decode_bool_results () =
+  match
+    J.For_testing.decode_bool_results "JSON.TOGGLE"
+      (R.Array [ R.Integer 0L; R.Integer 1L; R.Boolean true; R.Null ])
+  with
+  | Ok [ Some false; Some true; Some true; None ] -> ()
+  | Ok _ -> Alcotest.fail "unexpected bool decode"
+  | Error e -> Alcotest.failf "decode bool: %a" E.pp e
+
+let test_decode_obj_keys () =
+  let reply =
+    R.Array
+      [ R.Array [ R.Bulk_string "name"; R.Bulk_string "age" ];
+        R.Array [];
+      ]
+  in
+  match J.For_testing.decode_obj_keys reply with
+  | Ok [ Some [ "name"; "age" ]; Some [] ] -> ()
+  | Ok _ -> Alcotest.fail "unexpected obj keys decode"
+  | Error e -> Alcotest.failf "decode obj keys: %a" E.pp e
+
+let test_decode_protocol_violation () =
+  match J.For_testing.decode_mget (R.Integer 1L) with
+  | Error (E.Protocol_violation _) -> ()
+  | Ok _ -> Alcotest.fail "expected protocol violation"
+  | Error e -> Alcotest.failf "expected protocol violation, got %a" E.pp e
+
+let test_decode_rejects_integer_overflow () =
+  (match
+     J.For_testing.decode_int_results "JSON.ARRLEN"
+       (R.Array [ R.Integer Int64.max_int ])
+   with
+   | Error (E.Protocol_violation _) -> ()
+   | Ok _ -> Alcotest.fail "expected JSON.ARRLEN overflow rejection"
+   | Error e -> Alcotest.failf "expected protocol violation, got %a" E.pp e);
+  let client, _seen = fake_client ~reply:(R.Integer Int64.max_int) () in
+  match J.del client ~key:"json:1" with
+  | Error (E.Protocol_violation _) -> ()
+  | Ok _ -> Alcotest.fail "expected JSON.DEL overflow rejection"
+  | Error e -> Alcotest.failf "expected protocol violation, got %a" E.pp e
+
+let test_client_read_routing_preserves_config () =
+  let seen = ref None in
+  let exec ?timeout:_ target rf args =
+    seen := Some (target, rf, Array.to_list args);
+    Ok (R.Bulk_string "{\"name\":\"ada\"}")
+  in
+  let exec_multi ?timeout:_ _fan _args = [] in
+  let pair ?timeout:_ _target _args1 _args2 =
+    Error (E.Terminal "unused")
+  in
+  let router =
+    Router.make ~exec ~exec_multi ~pair ~close:(fun () -> ())
+      ~primary:(fun () -> None)
+      ~connection_for_slot:(fun _ -> None)
+      ~endpoint_for_slot:(fun _ -> None)
+      ~endpoint_for_node:(fun ~node_id:_ -> None)
+      ~all_connections:(fun () -> [])
+      ~is_standalone:false
+      ~atomic_lock_for_slot:(fun _ -> Eio.Mutex.create ())
+  in
+  let config = { C.Config.default with read_from = RF.Prefer_replica } in
+  let client = C.from_router ~config router in
+  (match J.get client ~key:"json:{1}" with
+   | Ok (Some "{\"name\":\"ada\"}") -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.GET payload"
+   | Error e -> Alcotest.failf "JSON.GET: %a" E.pp e);
+  match !seen with
+  | Some (T.By_slot s, RF.Prefer_replica, [ "JSON.GET"; "json:{1}" ])
+    when s = Valkey.Slot.of_key "json:{1}" -> ()
+  | Some _ ->
+      Alcotest.fail "JSON.GET should preserve client read_from config"
+  | None -> Alcotest.fail "fake router was not called"
+
+let test_client_write_routing_forces_primary () =
+  let seen = ref None in
+  let exec ?timeout:_ target rf args =
+    seen := Some (target, rf, Array.to_list args);
+    Ok (R.Simple_string "OK")
+  in
+  let exec_multi ?timeout:_ _fan _args = [] in
+  let pair ?timeout:_ _target _args1 _args2 =
+    Error (E.Terminal "unused")
+  in
+  let router =
+    Router.make ~exec ~exec_multi ~pair ~close:(fun () -> ())
+      ~primary:(fun () -> None)
+      ~connection_for_slot:(fun _ -> None)
+      ~endpoint_for_slot:(fun _ -> None)
+      ~endpoint_for_node:(fun ~node_id:_ -> None)
+      ~all_connections:(fun () -> [])
+      ~is_standalone:false
+      ~atomic_lock_for_slot:(fun _ -> Eio.Mutex.create ())
+  in
+  let config = { C.Config.default with read_from = RF.Prefer_replica } in
+  let client = C.from_router ~config router in
+  (match J.set client ~key:"json:{1}" "{\"name\":\"ada\"}" with
+   | Ok true -> ()
+   | Ok false -> Alcotest.fail "JSON.SET unexpectedly returned null"
+   | Error e -> Alcotest.failf "JSON.SET: %a" E.pp e);
+  match !seen with
+  | Some
+      ( T.By_slot s,
+        RF.Primary,
+        [ "JSON.SET"; "json:{1}"; "$"; "{\"name\":\"ada\"}" ] )
+    when s = Valkey.Slot.of_key "json:{1}" -> ()
+  | Some _ -> Alcotest.fail "JSON.SET should force Primary"
+  | None -> Alcotest.fail "fake router was not called"
+
+let tests =
+  [ Alcotest.test_case "JSON.SET args" `Quick test_set_args;
+    Alcotest.test_case "JSON.GET args with formatting" `Quick
+      test_get_args_with_format;
+    Alcotest.test_case "JSON.MGET args" `Quick test_mget_args;
+    Alcotest.test_case "JSON.ARRAPPEND args" `Quick test_arr_append_args;
+    Alcotest.test_case "JSON.MSET args and empty input" `Quick
+      test_mset_args_and_empty_input;
+    Alcotest.test_case "JSON key/path and number commands" `Quick
+      test_key_path_and_number_commands;
+    Alcotest.test_case "JSON array commands" `Quick test_array_commands;
+    Alcotest.test_case "JSON string/object/RESP commands" `Quick
+      test_string_object_and_resp_commands;
+    Alcotest.test_case "decode JSON.GET and JSON.MGET" `Quick
+      test_decode_get_and_mget;
+    Alcotest.test_case "decode JSON.TYPE and length results" `Quick
+      test_decode_type_and_lengths;
+    Alcotest.test_case "decode JSON.TOGGLE results" `Quick
+      test_decode_bool_results;
+    Alcotest.test_case "decode JSON.OBJKEYS" `Quick test_decode_obj_keys;
+    Alcotest.test_case "decode rejects bad MGET shape" `Quick
+      test_decode_protocol_violation;
+    Alcotest.test_case "decode rejects integer overflow" `Quick
+      test_decode_rejects_integer_overflow;
+    Alcotest.test_case "JSON.GET preserves read routing" `Quick
+      test_client_read_routing_preserves_config;
+    Alcotest.test_case "JSON.SET forces primary routing" `Quick
+      test_client_write_routing_forces_primary;
+  ]
