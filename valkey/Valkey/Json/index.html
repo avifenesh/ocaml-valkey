@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Json (valkey.Valkey.Json)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../../odoc.support/odoc.css"/><meta name="generator" content="odoc 3.2.1"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../../../index.html">Index</a> &#x00BB; <a href="../../index.html">valkey</a> &#x00BB; <a href="../index.html">Valkey</a> &#x00BB; Json</nav><header class="odoc-preamble"><h1>Module <code><span>Valkey.Json</span></code></h1><p>Typed helpers for the Valkey JSON module.</p><p>The API keeps JSON payloads as serialized strings instead of depending on a particular OCaml JSON library. Callers can use Yojson, jsonm, ppx_deriving_yojson, or hand-written encoders at the boundary and pass the resulting JSON text here.</p><p>Commands route by document key, so they work correctly in cluster mode as long as multi-key calls use co-located keys when Valkey requires it.</p></header><div class="odoc-content"><div class="odoc-spec"><div class="spec type anchored" id="type-set_condition"><a href="#type-set_condition" class="anchor"></a><code><span><span class="keyword">type</span> set_condition</span><span> = </span></code><ol><li id="type-set_condition.If_missing" class="def variant constructor anchored"><a href="#type-set_condition.If_missing" class="anchor"></a><code><span>| </span><span><span class="constructor">If_missing</span></span></code></li><li id="type-set_condition.If_exists" class="def variant constructor anchored"><a href="#type-set_condition.If_exists" class="anchor"></a><code><span>| </span><span><span class="constructor">If_exists</span></span></code><div class="def-doc"><span class="comment-delim">(*</span><p>Mutually exclusive <code>JSON.SET</code> existence conditions.</p><span class="comment-delim">*)</span></div></li></ol></div></div><div class="odoc-spec"><div class="spec type anchored" id="type-get_format"><a href="#type-get_format" class="anchor"></a><code><span><span class="keyword">type</span> get_format</span><span> = </span><span>{</span></code><ol><li id="type-get_format.indent" class="def record field anchored"><a href="#type-get_format.indent" class="anchor"></a><code><span>indent : <span>string option</span>;</span></code></li><li id="type-get_format.newline" class="def record field anchored"><a href="#type-get_format.newline" class="anchor"></a><code><span>newline : <span>string option</span>;</span></code></li><li id="type-get_format.space" class="def record field anchored"><a href="#type-get_format.space" class="anchor"></a><code><span>space : <span>string option</span>;</span></code></li><li id="type-get_format.no_escape" class="def record field anchored"><a href="#type-get_format.no_escape" class="anchor"></a><code><span>no_escape : bool;</span></code></li></ol><code><span>}</span></code></div><div class="spec-doc"><p>Optional <code>JSON.GET</code> formatting controls.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-default_get_format"><a href="#val-default_get_format" class="anchor"></a><code><span><span class="keyword">val</span> default_get_format : <a href="#type-get_format">get_format</a></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-set"><a href="#val-set" class="anchor"></a><code><span><span class="keyword">val</span> set : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?condition</span>:<a href="#type-set_condition">set_condition</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span>string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(bool, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p><code>JSON.SET key path json</code>. <code>path</code> defaults to <code>$</code>. Returns <code>false</code> when <code>If_missing</code> or <code>If_exists</code> prevented the write.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-get"><a href="#val-get" class="anchor"></a><code><span><span class="keyword">val</span> get : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?format</span>:<a href="#type-get_format">get_format</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?paths</span>:<span>string list</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span>string option</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p><code>JSON.GET</code>. The returned string is the server's serialized JSON payload. <code>None</code> means the key/path did not exist.</p></div></div><div class="odoc-spec"><div class="spec type anchored" id="type-mset_entry"><a href="#type-mset_entry" class="anchor"></a><code><span><span class="keyword">type</span> mset_entry</span><span> = </span><span>{</span></code><ol><li id="type-mset_entry.key" class="def record field anchored"><a href="#type-mset_entry.key" class="anchor"></a><code><span>key : string;</span></code></li><li id="type-mset_entry.path" class="def record field anchored"><a href="#type-mset_entry.path" class="anchor"></a><code><span>path : string;</span></code></li><li id="type-mset_entry.json" class="def record field anchored"><a href="#type-mset_entry.json" class="anchor"></a><code><span>json : string;</span></code></li></ol><code><span>}</span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-mget"><a href="#val-mget" class="anchor"></a><code><span><span class="keyword">val</span> mget : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">keys</span>:<span>string list</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>string option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p><code>JSON.MGET key [key ...] path</code>. Empty key lists are rejected with <code>Invalid_argument</code>. In cluster mode the keys should be hashtag co-located.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-mset"><a href="#val-mset" class="anchor"></a><code><span><span class="keyword">val</span> mset : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span><a href="#type-mset_entry">mset_entry</a> list</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(unit, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p><code>JSON.MSET key path json [key path json ...]</code>. Empty entry lists are rejected with <code>Invalid_argument</code>. In cluster mode the keys should be hashtag co-located.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-del"><a href="#val-del" class="anchor"></a><code><span><span class="keyword">val</span> del : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(int, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-forget"><a href="#val-forget" class="anchor"></a><code><span><span class="keyword">val</span> forget : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(int, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p>Alias for <a href="#val-del"><code>del</code></a>, matching <code>JSON.FORGET</code>.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-clear"><a href="#val-clear" class="anchor"></a><code><span><span class="keyword">val</span> clear : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(int, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-num_incr_by"><a href="#val-num_incr_by" class="anchor"></a><code><span><span class="keyword">val</span> num_incr_by : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span>float <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span>string option</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p><code>JSON.NUMINCRBY</code>. Valkey returns the updated value as JSON text (for enhanced paths this is usually a JSON array string).</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-num_mult_by"><a href="#val-num_mult_by" class="anchor"></a><code><span><span class="keyword">val</span> num_mult_by : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span>float <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span>string option</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-arr_append"><a href="#val-arr_append" class="anchor"></a><code><span><span class="keyword">val</span> arr_append : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>string list</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>int option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-arr_insert"><a href="#val-arr_insert" class="anchor"></a><code><span><span class="keyword">val</span> arr_insert : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">index</span>:int <span class="arrow">&#45;&gt;</span></span>
+  <span><span>string list</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>int option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-arr_len"><a href="#val-arr_len" class="anchor"></a><code><span><span class="keyword">val</span> arr_len : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>int option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-arr_pop"><a href="#val-arr_pop" class="anchor"></a><code><span><span class="keyword">val</span> arr_pop : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?index</span>:int <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>string option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p><code>JSON.ARRPOP</code>. If <code>index</code> is provided but <code>path</code> is omitted, the command uses <code>$</code> so Valkey receives a valid path/index pair.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-arr_trim"><a href="#val-arr_trim" class="anchor"></a><code><span><span class="keyword">val</span> arr_trim : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">start</span>:int <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">stop</span>:int <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>int option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-arr_index"><a href="#val-arr_index" class="anchor"></a><code><span><span class="keyword">val</span> arr_index : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?start</span>:int <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?stop</span>:int <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">json</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>int option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-strlen"><a href="#val-strlen" class="anchor"></a><code><span><span class="keyword">val</span> strlen : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>int option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-str_append"><a href="#val-str_append" class="anchor"></a><code><span><span class="keyword">val</span> str_append : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span>string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>int option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-toggle"><a href="#val-toggle" class="anchor"></a><code><span><span class="keyword">val</span> toggle : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>bool option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-type_of"><a href="#val-type_of" class="anchor"></a><code><span><span class="keyword">val</span> type_of : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>string option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-obj_len"><a href="#val-obj_len" class="anchor"></a><code><span><span class="keyword">val</span> obj_len : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span>int option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-obj_keys"><a href="#val-obj_keys" class="anchor"></a><code><span><span class="keyword">val</span> obj_keys : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span><span>string list</span> option</span> list</span>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p><code>JSON.OBJKEYS</code>. Restricted paths return <code>Some keys</code> as a single list; enhanced paths return one entry per match, with <code>None</code> for missing/non-object matches.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-resp"><a href="#val-resp" class="anchor"></a><code><span><span class="keyword">val</span> resp : 
+  <span><span class="optlabel">?timeout</span>:float <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?read_from</span>:<a href="../Router/Read_from/index.html#type-t">Router.Read_from.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?path</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Client/index.html#type-t">Client.t</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">key</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<a href="../Resp3/index.html#type-t">Resp3.t</a>, <a href="../Connection_error/index.html#type-t">Connection_error.t</a>)</span> <span class="xref-unresolved">Stdlib</span>.result</span></span></code></div><div class="spec-doc"><p>Raw <code>JSON.RESP</code> reply.</p></div></div><div class="odoc-spec"><div class="spec module anchored" id="module-For_testing"><a href="#module-For_testing" class="anchor"></a><code><span><span class="keyword">module</span> <a href="For_testing/index.html">For_testing</a></span><span> : <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div></div></div></body></html>
