@@ -110,6 +110,14 @@ let pick_node_by_read_from (rf : Router.Read_from.t) (shard : Topology.Shard.t) 
        | Some n -> n
        | None -> any_replica_or_primary ())
 
+let close_conn_quietly c =
+  try Connection.close c
+  with Eio.Io _ | End_of_file | Invalid_argument _
+     | Unix.Unix_error _ -> ()
+
+let close_bundle_quietly bundle =
+  Array.iter close_conn_quietly bundle
+
 (* Connect [n] independent Connections to [(host, port)]. All-or-
    nothing: if any one fails, close the ones we'd already opened
    and return [None]. A bundle with fewer than [n] conns would
@@ -141,12 +149,7 @@ let connect_bundle ~sw ~net ~clock ?domain_mgr ~connection_config
   let oks = List.filter_map (function Ok c -> Some c | Error _ -> None) outcomes in
   let any_err = List.exists (function Error _ -> true | _ -> false) outcomes in
   if any_err then begin
-    List.iter
-      (fun c ->
-        try Connection.close c
-        with Eio.Io _ | End_of_file | Invalid_argument _
-           | Unix.Unix_error _ -> ())
-      oks;
+    List.iter close_conn_quietly oks;
     None
   end
   else Some (Array.of_list oks)
@@ -667,7 +670,7 @@ let from_pool_and_topology ?(max_redirects = 5) ~clock ~pool ~topology () =
 
 let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
     ~connections_per_node ~prefer_hostname ~topology_hooks
-    ~pool ~old_topology ~new_topology () =
+    ~pool ~old_topology ~new_topology ~closing () =
   let new_nodes = Topology.all_nodes new_topology in
   let new_ids =
     List.map (fun (n : Topology.Node.t) -> n.id) new_nodes
@@ -689,12 +692,7 @@ let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
       if not (List.mem id new_ids) then begin
         (match Node_pool.remove_bundle pool ~node_id:id with
          | Some arr ->
-             Array.iter
-               (fun c ->
-                 try Connection.close c
-                 with Eio.Io _ | End_of_file | Invalid_argument _
-                    | Unix.Unix_error _ -> ())
-               arr
+             close_bundle_quietly arr
          | None -> ());
         (try topology_hooks.Config.on_node_removed ~node_id:id
          with _ -> ())
@@ -721,7 +719,9 @@ let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
   (* Add new (online nodes only) *)
   Eio.Fiber.List.iter
     (fun (n : Topology.Node.t) ->
-      if not (List.mem n.id old_ids) && n.health = Topology.Node.Online
+      if (not (Atomic.get closing))
+         && not (List.mem n.id old_ids)
+         && n.health = Topology.Node.Online
       then
         match endpoint n with
         | Some host, Some port ->
@@ -730,16 +730,31 @@ let diff_pool ~sw ~net ~clock ?domain_mgr ~connection_config
                  ~connection_config ~host ~port connections_per_node
              with
              | Some bundle ->
-                 Node_pool.add_bundle pool ~node_id:n.id bundle
+                 if Atomic.get closing then close_bundle_quietly bundle
+                 else begin
+                   Node_pool.add_bundle pool ~node_id:n.id bundle;
+                   if Atomic.get closing then
+                     match Node_pool.remove_bundle pool ~node_id:n.id with
+                     | Some added -> close_bundle_quietly added
+                     | None -> ()
+                 end
              | None -> ())
         | _ -> ())
     new_nodes
 
-let query_pool_for_topology pool =
+let topology_request_timeout (cfg : Config.t) =
+  match cfg.connection.Connection.Config.command_timeout with
+  | Some _ as t -> t
+  | None -> Some cfg.connection.Connection.Config.reconnect.handshake_timeout
+
+let query_pool_for_topology ?request_timeout pool =
   let conns = Node_pool.all_connections pool in
   Eio.Fiber.List.map
     (fun c ->
-      match Connection.request c [| "CLUSTER"; "SHARDS" |] with
+      match
+        Connection.request ?timeout:request_timeout c
+          [| "CLUSTER"; "SHARDS" |]
+      with
       | Ok reply ->
           (match Topology.of_cluster_shards reply with
            | Ok t -> Some t
@@ -748,73 +763,85 @@ let query_pool_for_topology pool =
     conns
 
 let apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-    ~topology_atomic new_topo =
+    ~topology_atomic ~closing new_topo =
   let current = Atomic.get topology_atomic in
-  if Topology.sha new_topo <> Topology.sha current then begin
+  if (not (Atomic.get closing))
+     && Topology.sha new_topo <> Topology.sha current then begin
     diff_pool ~sw ~net ~clock ?domain_mgr
       ~connection_config:cfg.Config.connection
       ~connections_per_node:cfg.Config.connections_per_node
       ~prefer_hostname:cfg.Config.prefer_hostname
       ~topology_hooks:cfg.Config.topology_hooks
-      ~pool ~old_topology:current ~new_topology:new_topo ();
-    Atomic.set topology_atomic new_topo;
-    (* Topology changed — slot ownership may have shifted, failover
-       may have rotated primaries. The server on any reconnected
-       shard has forgotten our CLIENT TRACKING context, so entries
-       in the CSC cache keyed by keys that route to those shards
-       are now un-tracked on the server side: an external write
-       would not produce an invalidation for us. Conservative fix:
-       clear the whole CSC cache on any topology change. Matches
-       redis-py. See docs/client-side-caching.md step 7. *)
-    (match cfg.Config.connection.Connection.Config.client_cache with
-     | None -> ()
-     | Some ccfg -> Cache.clear ccfg.Client_cache.cache)
+      ~pool ~old_topology:current ~new_topology:new_topo ~closing ();
+    if not (Atomic.get closing) then begin
+      Atomic.set topology_atomic new_topo;
+      (* Topology changed — slot ownership may have shifted, failover
+         may have rotated primaries. The server on any reconnected
+         shard has forgotten our CLIENT TRACKING context, so entries
+         in the CSC cache keyed by keys that route to those shards
+         are now un-tracked on the server side: an external write
+         would not produce an invalidation for us. Conservative fix:
+         clear the whole CSC cache on any topology change. Matches
+         redis-py. See docs/client-side-caching.md step 7. *)
+      (match cfg.Config.connection.Connection.Config.client_cache with
+       | None -> ()
+       | Some ccfg -> Cache.clear ccfg.Client_cache.cache)
+    end
   end
 
 let refresh_from_seeds ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-    ~topology_atomic () =
+    ~topology_atomic ~closing () =
   match
     Discovery.discover_from_seeds
       ~sw ~net ~clock ?domain_mgr
       ~connection_config:cfg.Config.connection
+      ?request_timeout:(topology_request_timeout cfg)
       ~agreement_ratio:cfg.Config.agreement_ratio
       ~min_nodes_for_quorum:cfg.Config.min_nodes_for_quorum
       ~seeds:cfg.Config.seeds ()
   with
   | Ok new_topo ->
       apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-        ~topology_atomic new_topo
+        ~topology_atomic ~closing new_topo
   | Error _ -> ()
 
-let refresh_once ~sw ~net ~clock ?domain_mgr ~cfg ~pool ~topology_atomic () =
+let refresh_once ~sw ~net ~clock ?domain_mgr ~cfg ~pool ~topology_atomic
+    ~closing () =
   Observability.refresh_span (fun span ->
-    let views = query_pool_for_topology pool in
-    let queried = List.length views in
-    match
-      Discovery.select
-        ~agreement_ratio:cfg.Config.agreement_ratio
-        ~min_nodes_for_quorum:cfg.Config.min_nodes_for_quorum
-        ~queried ~views
-    with
-    | Agreed new_topo ->
-        Observability.record_discovery_outcome span `Agreed;
-        apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-          ~topology_atomic new_topo
-    | Agreed_fallback new_topo ->
-        Observability.record_discovery_outcome span `Agreed_fallback;
-        apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-          ~topology_atomic new_topo
-    | No_agreement ->
-        Observability.record_discovery_outcome span `No_agreement;
-        (* Pool is empty or every node is unreachable / disagrees. Fall
-           back to the seed list — that is how the cluster was bootstrapped,
-           and the only address set we can be sure is still meaningful to
-           the operator. *)
-        refresh_from_seeds ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-          ~topology_atomic ())
+    if Atomic.get closing then ()
+    else
+      let request_timeout = topology_request_timeout cfg in
+      let views = query_pool_for_topology ?request_timeout pool in
+      let queried = List.length views in
+      if Atomic.get closing then ()
+      else
+        match
+          Discovery.select
+            ~agreement_ratio:cfg.Config.agreement_ratio
+            ~min_nodes_for_quorum:cfg.Config.min_nodes_for_quorum
+            ~queried ~views
+        with
+        | Agreed new_topo ->
+            Observability.record_discovery_outcome span `Agreed;
+            apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+              ~topology_atomic ~closing new_topo
+        | Agreed_fallback new_topo ->
+            Observability.record_discovery_outcome span `Agreed_fallback;
+            apply_new_topology ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+              ~topology_atomic ~closing new_topo
+        | No_agreement ->
+            Observability.record_discovery_outcome span `No_agreement;
+            (* Pool is empty or every node is unreachable / disagrees. Fall
+               back to the seed list — that is how the cluster was bootstrapped,
+               and the only address set we can be sure is still meaningful to
+               the operator. *)
+            if not (Atomic.get closing) then
+              refresh_from_seeds ~sw ~net ~clock ?domain_mgr ~cfg ~pool
+                ~topology_atomic ~closing ())
 
 let refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-    ~topology_atomic ~refresh_signal ~refresh_mutex ~closing () =
+    ~topology_atomic ~refresh_signal ~refresh_mutex ~closing
+    ~close_signal () =
   let rec loop () =
     if Atomic.get closing then ()
     else
@@ -822,22 +849,28 @@ let refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
         cfg.Config.refresh_interval
         +. Random.float cfg.Config.refresh_jitter
       in
-      let _ : [ `Elapsed | `Signal ] =
+      let outcome : [ `Elapsed | `Signal | `Closed ] =
         Eio.Fiber.first
           (fun () -> Eio.Time.sleep clock interval; `Elapsed)
           (fun () ->
-            Eio.Mutex.use_rw ~protect:true refresh_mutex (fun () ->
-                Eio.Condition.await refresh_signal refresh_mutex);
-            `Signal)
+            Eio.Fiber.first
+              (fun () ->
+                Eio.Mutex.use_rw ~protect:true refresh_mutex (fun () ->
+                    Eio.Condition.await refresh_signal refresh_mutex);
+                `Signal)
+              (fun () ->
+                Eio.Promise.await close_signal;
+                `Closed))
       in
-      if Atomic.get closing then ()
-      else begin
+      match outcome with
+      | `Closed -> ()
+      | `Elapsed | `Signal when Atomic.get closing -> ()
+      | `Elapsed | `Signal ->
         (try
            refresh_once ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-             ~topology_atomic ()
+             ~topology_atomic ~closing ()
          with _ -> ());
         loop ()
-      end
   in
   try loop () with _ -> ()
 
@@ -847,6 +880,7 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
     Discovery.discover_from_seeds
       ~sw ~net ~clock ?domain_mgr
       ~connection_config:cfg.connection
+      ?request_timeout:(topology_request_timeout cfg)
       ~agreement_ratio:cfg.agreement_ratio
       ~min_nodes_for_quorum:cfg.min_nodes_for_quorum
       ~seeds:cfg.seeds ()
@@ -862,11 +896,13 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
       in
       let topology_atomic = Atomic.make topology in
       let closing = Atomic.make false in
+      let close_signal, close_resolver = Eio.Promise.create () in
       let refresh_signal = Eio.Condition.create () in
       let refresh_mutex = Eio.Mutex.create () in
       Eio.Fiber.fork ~sw (fun () ->
           refresh_loop ~sw ~net ~clock ?domain_mgr ~cfg ~pool
-            ~topology_atomic ~refresh_signal ~refresh_mutex ~closing ());
+            ~topology_atomic ~refresh_signal ~refresh_mutex ~closing
+            ~close_signal ());
       let topology_ref = ref topology in
       (* Eager Cache.clear in addition to the refresh fiber's own
          clear-on-sha-change: refresh is async (CLUSTER SHARDS
@@ -897,6 +933,8 @@ let create ~sw ~net ~clock ?domain_mgr ~config:(cfg : Config.t) () =
       let close () =
         if Atomic.exchange closing true then ()
         else begin
+          (try Eio.Promise.resolve close_resolver ()
+           with Invalid_argument _ -> ());
           Eio.Condition.broadcast refresh_signal;
           Node_pool.close_all pool
         end

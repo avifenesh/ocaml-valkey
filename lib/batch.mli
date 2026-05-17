@@ -158,6 +158,7 @@ val run :
 type guard
 
 val watch :
+  ?timeout:float ->
   ?hint_key:string ->
   Client.t -> string list ->
   (guard, Connection.Error.t) result
@@ -166,7 +167,8 @@ val watch :
     watched key hashes to the same slot, acquires the primary's
     atomic mutex, then sends [WATCH k1 k2 …] on the pinned
     connection. Caller must eventually call {!run_with_guard} or
-    {!release_guard}; {!with_watch} handles the release for you. *)
+    {!release_guard}; {!with_watch} handles the release for you.
+    [timeout] bounds the initial WATCH command. *)
 
 val run_with_guard :
   ?timeout:float ->
@@ -192,13 +194,16 @@ val release_guard : guard -> unit
     safe to call after {!run_with_guard} has already released. *)
 
 val with_watch :
+  ?timeout:float ->
   ?hint_key:string ->
   Client.t -> string list ->
   (guard -> 'a) -> ('a, Connection.Error.t) result
 (** Scoped WATCH guard. Opens the guard, runs [f guard], and
     releases (UNWATCH + mutex unlock) whether [f] returns
     normally or raises. If [watch] itself fails, returns the
-    error and never calls [f]. *)
+    error and never calls [f]. [timeout] bounds the initial
+    WATCH command; pass a timeout to {!run_with_guard} separately
+    to bound the commit path. *)
 
 (** {1 Cluster-aware typed helpers}
 

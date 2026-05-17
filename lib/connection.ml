@@ -382,7 +382,12 @@ let extract_string_field key = function
   | _ -> None
 
 
-let run_hello (sock : socket) (hs : Handshake.t) : (Resp3.t, Error.t) result =
+let handshake_io_error ~using_tls reason =
+  if using_tls then Error.Tls_failed reason
+  else Error.Tcp_refused reason
+
+let run_hello ~using_tls (sock : socket) (hs : Handshake.t) :
+    (Resp3.t, Error.t) result =
   try
     sock.write [ Resp3_writer.command_to_cstruct (hello_args hs) ];
     match Resp3_parser.read (Resp3_parser.of_buf_read sock.reader) with
@@ -405,9 +410,9 @@ let run_hello (sock : socket) (hs : Handshake.t) : (Resp3.t, Error.t) result =
       (* Peer closed the TLS/TCP connection without sending HELLO
          reply — most commonly an mTLS setup where the server
          tore down immediately. *)
-      Error (Error.Tls_failed "peer_closed_during_handshake")
+      Error (handshake_io_error ~using_tls "peer_closed_during_handshake")
   | Eio.Io _ as exn ->
-      Error (Error.Tls_failed (describe_exn exn))
+      Error (handshake_io_error ~using_tls (describe_exn exn))
 
 let run_select (sock : socket) db : (unit, Error.t) result =
   sock.write
@@ -465,10 +470,10 @@ type handshake_result = {
   hs_availability_zone : string option;
 }
 
-let full_handshake (sock : socket) (hs : Handshake.t)
+let full_handshake ~using_tls (sock : socket) (hs : Handshake.t)
     ~(client_cache : Client_cache.t option) :
     (handshake_result, Error.t) result =
-  match run_hello sock hs with
+  match run_hello ~using_tls sock hs with
   | Error e -> Error e
   | Ok hello_map ->
       let az = extract_string_field "availability_zone" hello_map in
@@ -614,6 +619,7 @@ let connect_and_handshake t :
       | Ok sock ->
           (match
              full_handshake sock t.config.handshake
+               ~using_tls:(t.config.tls <> None)
                ~client_cache:t.config.client_cache
            with
            | Ok result -> Ok (sock, result)
@@ -778,6 +784,15 @@ let run_connection (t : t) (sock : socket) : [ `Closed | `Disconnected ] =
    with _ -> ());
   if Atomic.get t.closing then `Closed else `Disconnected
 
+let sleep_until_retry_or_cancel t delay =
+  Eio.Fiber.first
+    (fun () ->
+      t.sleep delay;
+      `Retry)
+    (fun () ->
+      Eio.Promise.await t.cancel_signal;
+      `Cancelled)
+
 let recovery_loop (t : t) : unit =
   let policy = t.config.reconnect in
   let start = t.now () in
@@ -801,22 +816,31 @@ let recovery_loop (t : t) : unit =
           drain_cmd_queue t (Error Error.Interrupted))
     else
       match
-        t.with_timeout policy.handshake_timeout (fun () ->
-            connect_and_handshake t)
+        Eio.Fiber.first
+          (fun () ->
+            `Result
+              (t.with_timeout policy.handshake_timeout (fun () ->
+                   connect_and_handshake t)))
+          (fun () ->
+            Eio.Promise.await t.cancel_signal;
+            `Cancelled)
       with
-      | Error `Timeout ->
-          t.sleep (jittered_backoff policy n);
-          attempt (n + 1)
-      | Ok (Error e) when Error.is_terminal e ->
+      | `Cancelled -> ()
+      | `Result (Error `Timeout) ->
+          (match sleep_until_retry_or_cancel t (jittered_backoff policy n) with
+           | `Cancelled -> ()
+           | `Retry -> attempt (n + 1))
+      | `Result (Ok (Error e)) when Error.is_terminal e ->
           Eio.Mutex.use_rw ~protect:true t.state_mutex (fun () ->
               set_state t (Dead e);
               drain_sent t (Error e);
               drain_unsent t (Error e);
               drain_cmd_queue t (Error e))
-      | Ok (Error _) ->
-          t.sleep (jittered_backoff policy n);
-          attempt (n + 1)
-      | Ok (Ok (sock, hs_result)) ->
+      | `Result (Ok (Error _)) ->
+          (match sleep_until_retry_or_cancel t (jittered_backoff policy n) with
+           | `Cancelled -> ()
+           | `Retry -> attempt (n + 1))
+      | `Result (Ok (Ok (sock, hs_result))) ->
           (* The server forgot our CLIENT TRACKING context while we
              were disconnected. Any cached entry we own for a key
              that routed through this connection is now un-tracked
@@ -1266,9 +1290,10 @@ let close t =
         drain_cmd_queue t (Error Closed);
         c)
   in
-  match sock_to_close with
-  | Some sock -> (try sock.close ()
-           with Eio.Io _ | End_of_file | Invalid_argument _
-              | Unix.Unix_error _ -> ())
-  | None -> ()
+  (match sock_to_close with
+   | Some sock ->
+       (try sock.close ()
+        with Eio.Io _ | End_of_file | Invalid_argument _
+           | Unix.Unix_error _ -> ())
+   | None -> ())
   end

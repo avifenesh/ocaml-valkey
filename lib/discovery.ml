@@ -40,7 +40,8 @@ let select ~agreement_ratio ~min_nodes_for_quorum ~queried ~views =
              if ratio >= agreement_ratio then Agreed t1
              else Agreed_fallback t1)
 
-let query_seed ~sw ~net ~clock ?domain_mgr ?connection_config (host, port) =
+let query_seed ~sw ~net ~clock ?domain_mgr ?connection_config
+    ?request_timeout (host, port) =
   let conn =
     try
       Some
@@ -52,7 +53,10 @@ let query_seed ~sw ~net ~clock ?domain_mgr ?connection_config (host, port) =
   | None -> None
   | Some c ->
       let topo =
-        match Connection.request c [| "CLUSTER"; "SHARDS" |] with
+        match
+          Connection.request ?timeout:request_timeout c
+            [| "CLUSTER"; "SHARDS" |]
+        with
         | Ok reply ->
             (match Topology.of_cluster_shards reply with
              | Ok t -> Some t
@@ -65,11 +69,13 @@ let query_seed ~sw ~net ~clock ?domain_mgr ?connection_config (host, port) =
       topo
 
 let discover_from_seeds ~sw ~net ~clock ?domain_mgr ?connection_config
+    ?request_timeout
     ?(agreement_ratio = 0.2) ?(min_nodes_for_quorum = 3) ~seeds () =
   Observability.discover_span ~seed_count:(List.length seeds) (fun span ->
     let views =
       Eio.Fiber.List.map
-        (query_seed ~sw ~net ~clock ?domain_mgr ?connection_config)
+        (query_seed ~sw ~net ~clock ?domain_mgr ?connection_config
+           ?request_timeout)
         seeds
     in
     let queried = List.length seeds in

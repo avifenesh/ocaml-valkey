@@ -34,6 +34,7 @@ val discover_from_seeds :
   clock:_ Eio.Time.clock ->
   ?domain_mgr:_ Eio.Domain_manager.t ->
   ?connection_config:Connection.Config.t ->
+  ?request_timeout:float ->
   ?agreement_ratio:float ->
   ?min_nodes_for_quorum:int ->
   seeds:(string * int) list ->
@@ -44,5 +45,7 @@ val discover_from_seeds :
 
     All transient connections are closed before return. The selected
     topology is what the caller should feed to the cluster router.
+    [request_timeout] bounds each transient [CLUSTER SHARDS]
+    request; timed-out nodes count as missing views.
 
     Defaults: [agreement_ratio = 0.2], [min_nodes_for_quorum = 3]. *)

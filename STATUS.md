@@ -1,11 +1,14 @@
 # Project status and next steps
 
-**Snapshot taken:** 2026-04-30, `main` with v0.3.0 tagged.
+**Snapshot taken:** 2026-05-01, `main` with v0.3.1 tagged.
 
 This document captures what's shipped on `main`, what's immediately
-runnable, the test posture, and what's queued next. v0.3.0 bundles
-Phase 9 (blocking pool) + Phase 10 (AWS IAM auth + mTLS) on top of
-Phases 0–8. The tag is pushed; opam-repository PR is in flight.
+runnable, the test posture, and what's queued next. v0.3.1 is a
+patch on top of v0.3.0: same feature set (Phase 9 blocking pool +
+Phase 10 AWS IAM auth + mTLS on top of Phases 0–8), with the opam
+`runtest` sandbox fix for mTLS test fixtures (reported by @jmid on
+[opam-repository#29825](https://github.com/ocaml/opam-repository/pull/29825)).
+The tag is pushed; opam-repository PR is in flight.
 
 Canonical references this complements — not replaces:
 - [README.md](README.md) — user-facing surface.
@@ -251,8 +254,17 @@ implementing.
 
 ### Release and stabilise
 
-- [x] **Release `valkey.0.3.0`** — tag pushed; opam PR in flight.
+- [x] **Release `valkey.0.3.0`** — tag pushed.
       Bundles Phase 9 (blocking pool) and Phase 10 (IAM + mTLS).
+      opam PR ([#29825](https://github.com/ocaml/opam-repository/pull/29825))
+      superseded by 0.3.1 after @jmid caught the `runtest` sandbox
+      failure on mTLS test fixtures.
+- [x] **Release `valkey.0.3.1`** — tag pushed; opam PR in flight.
+      Patch-only: ships committed self-signed fixtures under
+      `test/fixtures/mtls/` so opam-sandbox `runtest` no longer
+      depends on `scripts/gen-tls-certs.sh`. Live mTLS integration
+      test still reads from `tls/`. `dune-project` regenerated to
+      clear v0.3.0 drift in `valkey.opam`.
 
 ### Roadmap continuations
 
@@ -277,9 +289,13 @@ implementing.
       `refresh_auth` same / bad / rotated-password paths;
       `bin/iam_smoke/` verified end-to-end against ElastiCache for
       Valkey serverless.
-- [ ] **Phase 11 — Module support.** Typed wrappers for `valkey-json`,
-      `valkey-search`, `valkey-bloom`. Per-module opam package or a
-      single `valkey-modules` meta?
+- [ ] **Phase 11 — Module support.** `Valkey.Search` has landed:
+      typed `FT.CREATE` schema builders, `FT.SEARCH`,
+      `FT.AGGREGATE`, `FT.INFO`, `FT._LIST`, and `FT.DROPINDEX`,
+      plus bundle-backed integration coverage and
+      `examples/11-search/`. `valkey-json` and `valkey-bloom`
+      remain pending. Per-module opam package or a single
+      `valkey-modules` meta?
 - [ ] **Phase 12 — Full audit pass.** Before 1.0.
 
 ### CSC follow-ups (optional)

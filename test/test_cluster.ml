@@ -495,9 +495,10 @@ let test_cluster_info_contains_state () =
         Alcotest.failf "cluster_state missing in:\n%s" info
 
 (* Restart the primary that currently owns [slot] and confirm the
-   sharded subscriber's watchdog re-pins on the (possibly new)
-   primary once the topology settles, replays SSUBSCRIBE, and
-   delivery resumes. *)
+   sharded subscriber reconnects, replays SSUBSCRIBE, and delivery
+   resumes. Docker restarts often preserve the Valkey node id, so
+   this exercises the connection replay path as much as the
+   topology-watchdog path. *)
 let test_cluster_pubsub_failover_replay () =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -513,7 +514,13 @@ let test_cluster_pubsub_failover_replay () =
   | Error m -> Alcotest.failf "cluster router: %s" m
   | Ok router ->
       let pubclient = C.from_router ~config:C.Config.default router in
-      let cp = CP.create ~sw ~net ~clock ~router () in
+      let pubsub_connection_config =
+        { Conn.Config.default with keepalive_interval = Some 1.0 }
+      in
+      let cp =
+        CP.create ~sw ~net ~clock
+          ~connection_config:pubsub_connection_config ~router ()
+      in
       Fun.protect
         ~finally:(fun () -> CP.close cp; C.close pubclient)
       @@ fun () ->
@@ -524,7 +531,10 @@ let test_cluster_pubsub_failover_replay () =
       Eio.Time.sleep clock 0.1;
 
       (* Baseline: sharded delivery works. *)
-      ignore (C.spublish pubclient ~channel ~message:"pre-restart");
+      (match C.spublish pubclient ~channel ~message:"pre-restart" with
+       | Ok 1 -> ()
+       | Ok n -> Alcotest.failf "pre-restart SPUBLISH returned %d" n
+       | Error e -> Alcotest.failf "pre-restart SPUBLISH: %a" err_pp e);
       (match CP.next_message ~timeout:2.0 cp with
        | Ok (PS.Shard { payload = "pre-restart"; _ }) -> ()
        | Ok _ -> Alcotest.fail "unexpected pre-restart delivery"
@@ -532,8 +542,10 @@ let test_cluster_pubsub_failover_replay () =
            Alcotest.fail "baseline sharded delivery timed out");
 
       (* Restart every primary one by one — whichever one owns the
-         slot, we'll catch it. Gives the router ~2s after each
-         restart to observe and refresh topology. *)
+         slot, we'll catch it. Docker's port-forwarding layer does
+         not always deliver EOF to the host client promptly, so the
+         short keepalive above makes the reconnect + replay path
+         deterministic within this test's deadline. *)
       let primaries = [
         "ocaml-valkey-c1";
         "ocaml-valkey-c2";
@@ -548,17 +560,19 @@ let test_cluster_pubsub_failover_replay () =
           Eio.Time.sleep clock 3.0)
         primaries;
 
-      (* Now publish again and expect delivery via the re-pinned
-         shard connection. Generous timeout to absorb topology
-         settle + reconnect + replay. *)
+      (* Now publish again and expect delivery via the reconnected
+         or re-pinned shard connection. Generous timeout to absorb
+         topology settle + reconnect + replay. *)
       let deadline = Unix.gettimeofday () +. 15.0 in
       let rec try_once () =
         if Unix.gettimeofday () > deadline then
           Alcotest.fail
-            "no post-failover delivery within 15s; watchdog \
-             didn't replay SSUBSCRIBE on the re-pinned shard"
+            "no post-restart delivery within 15s; SSUBSCRIBE was \
+             not replayed on the recovered shard connection"
         else begin
-          ignore (C.spublish pubclient ~channel ~message:"post-restart");
+          (match C.spublish pubclient ~channel ~message:"post-restart" with
+           | Ok _ -> ()
+           | Error e -> Alcotest.failf "post-restart SPUBLISH: %a" err_pp e);
           match CP.next_message ~timeout:1.0 cp with
           | Ok (PS.Shard { payload = "post-restart"; _ }) -> ()
           | Ok (PS.Shard { payload = "pre-restart"; _ }) ->
