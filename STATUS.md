@@ -1,14 +1,13 @@
 # Project status and next steps
 
-**Snapshot taken:** 2026-05-01, `main` with v0.3.1 tagged.
+**Snapshot taken:** 2026-05-17, `main` after Phase 11 module support.
 
 This document captures what's shipped on `main`, what's immediately
-runnable, the test posture, and what's queued next. v0.3.1 is a
-patch on top of v0.3.0: same feature set (Phase 9 blocking pool +
-Phase 10 AWS IAM auth + mTLS on top of Phases 0–8), with the opam
-`runtest` sandbox fix for mTLS test fixtures (reported by @jmid on
-[opam-repository#29825](https://github.com/ocaml/opam-repository/pull/29825)).
-The tag is pushed; opam-repository PR is in flight.
+runnable, the test posture, and what's queued next. v0.3.1 is live
+on opam. v0.4.0 is prepared as the module-support release: Search,
+JSON, and Bloom all have typed wrappers, bundle-backed integration
+coverage, and runnable examples. The remaining pre-1.0 work is the
+full audit pass over the now-complete public surface.
 
 Canonical references this complements — not replaces:
 - [README.md](README.md) — user-facing surface.
@@ -20,11 +19,13 @@ Canonical references this complements — not replaces:
 
 ---
 
-## 1. Released today
+## 1. Published release baseline
 
-**`valkey.0.2.0`** is live on opam. Shipped with commit `f6d3681`.
+**`valkey.0.3.1`** is live on opam. It superseded `0.3.0` with
+the opam-sandbox fixture fix for mTLS tests; `0.4.0` is the next
+prepared release and adds the Valkey Bundle module surface.
 
-What's in 0.2.0, from [CHANGELOG.md](CHANGELOG.md):
+The baseline through 0.2.0, from [CHANGELOG.md](CHANGELOG.md):
 
 - Standalone + cluster client, RESP3-only, OCaml 5.3+/Eio-native.
 - Atomic + scatter-gather `Batch` with `WATCH` guards, cross-slot helpers
@@ -37,7 +38,7 @@ What's in 0.2.0, from [CHANGELOG.md](CHANGELOG.md):
   Ubuntu × OCaml {5.3, 5.4} + macOS subset CI; 60% coverage floor;
   nightly 200M-input parser fuzz + 15-min cluster chaos.
 
-## 2. Landed since 0.2.0 (unreleased; on `main`)
+## 2. Landed after 0.2.0
 
 ### Phase 2.5 — security audit pass (commits `f0e771e..2d281db`)
 
@@ -142,86 +143,37 @@ full step-by-step.
 
 ## 3. Test posture
 
-Two targets, both green at the current commit:
+Current release-prep gates:
 
-### Pure-unit — `dune build @runtest` — **143 tests**
+- `EIO_BACKEND=posix dune runtest` — pure units, no server
+  dependency. The v0.4.0 prep run passed 238 tests.
+- `EIO_BACKEND=posix dune exec test/run_tests.exe` — live
+  standalone, cluster, and Valkey Bundle integration suite. The
+  v0.4.0 prep run passed 391 tests with `VALKEY_SEARCH_PORT=6381`,
+  `VALKEY_JSON_PORT=6381`, and `VALKEY_BLOOM_PORT=6381`.
+- `opam lint valkey.opam` validates the generated package file.
+- `EIO_BACKEND=posix opam exec -- dune build -p valkey @install
+  @runtest` validates the opam package build recipe.
+- CI now exercises the full live integration suite with standalone,
+  cluster, and Valkey Bundle services in the Linux matrix, in
+  addition to the coverage workflow.
 
-Opam-CI clean. No server dependency. Runs in ~5s.
+The full live run requires:
 
-| Suite | Count | Note |
-|-------|------:|------|
-| `resp3` + round-trip | 56 | Parser + writer |
-| `retry state machine` | small | Cluster retry invariants |
-| `byte_reader` | small | Stream reader edge cases |
-| `valkey_error` | small | Server-error parse |
-| `slot` / `topology` / `discovery` | small | Cluster primitives |
-| `redirect` | 5 | MOVED/ASK parser |
-| `command_spec` | 20 | Per-command routing |
-| `cache` | 22 | LRU/byte budget/TTL/metrics |
-| `invalidation parser` | 16 | RESP3 push → `Invalidation.t`; `apply` |
-| `inflight` | 12 | Single-flight + dirty-flip |
-| `csc optin (pure)` | 4 | `map_optin_pair_reply` arms (outer Error, frame-1 transport error, happy path, non-OK CACHING reply -> Protocol_violation) |
-
-### Integration — `dune exec test/run_tests.exe` — **full suite** against live servers
-
-Requires `docker compose up -d` (standalone at `:6379`) and optionally
-`docker compose -f docker-compose.cluster.yml up -d` plus
-`bash scripts/cluster-hosts-setup.sh` (cluster at `:7000..:7005`).
-
-CSC-specific slice (38 tests, all green at the current commit):
-
-| File | Count | Scope |
-|------|------:|-------|
-| `test_csc_tracking.ml` | 2 | B1 handshake + reconnect re-issue |
-| `test_csc_invalidation.ml` | 7 | External SET/DEL/FLUSHDB, single-flight (2 & 10 concurrent), metrics |
-| `test_csc_hash_set.ml` | 4 | `HGETALL` + `SMEMBERS` populate/evict |
-| `test_csc_mget.ml` | 5 | All-miss / all-hit / partial-hit / null-not-cached / evict |
-| `test_csc_cluster.ml` | 2 | Two-shard invalidation; cluster-wide `FLUSHDB` |
-| `test_csc_lifecycle.ml` | 3 | Standalone reconnect flush; live `CLUSTER FAILOVER FORCE`; TTL expiry without invalidation |
-| `test_csc_bcast.ml` | 3 | `TRACKINGINFO` flags; in-prefix evict; out-of-prefix isolation |
-| `test_csc_optin.ml` | 6 | Populate-then-hit; external SET evicts; 50-fiber concurrent OPTIN tracking; CACHING-error path; read after `Client.close` returns transport error; tiny `max_queued_bytes` returns `Queue_full` |
-| `test_csc_optin_cluster.ml` | 3 | Two-shard populate + cross-shard evict; 25-fiber concurrent OPTIN across all 3 shards; MOVED-retry against wrong-target routing |
-| `test_csc_optin_migration.ml` | 3 | Live `CLUSTER SETSLOT MIGRATING/IMPORTING` window; OPTIN ASK retry single-key smoke; 25-fiber OPTIN ASK retry; 25-fiber non-CSC ASK retry (catches the latent `[ASKING; cmd]` non-atomic-submit ordering bug under contention) |
-
-CSC tests run against live Valkey 9.0.3 standalone **and** a
-live 6-node cluster with real primary promotion. OPTIN cluster
-support travels through `Router.pair`, with MOVED on the read
-frame triggering a redirect-aware retry of the whole pair.
-Nothing skipped.
+1. `docker compose up -d` for standalone Valkey.
+2. `sudo bash scripts/cluster-hosts-setup.sh` and
+   `docker compose -f docker-compose.cluster.yml up -d` for the
+   cluster suite.
+3. `docker compose -f docker-compose.search.yml up -d` for
+   Search, JSON, and Bloom module tests through Valkey Bundle.
 
 ---
 
-## 4. Environment (about to change)
+## 4. Environment
 
-**Current (Windows + WSL):**
-
-- Build: `MSYS_NO_PATHCONV=1 wsl bash /mnt/c/Users/avife/AppData/Local/Temp/build_check.sh`
-  (analogous scripts for `@runtest` and the integration target live in `AppData/Local/Temp/`).
-- Docker Desktop with the WSL integration enabled.
-- `/etc/hosts` in WSL has the cluster hostname mappings
-  (`127.0.0.1 valkey-c1 valkey-c2 valkey-c3 valkey-c4 valkey-c5 valkey-c6`)
-  so that CLUSTER SHARDS' hostname-endpoints resolve.
-- `opam` switch at OCaml 5.3.0, all deps installed.
-
-**Migration targets (Ubuntu):**
-
-- Stock `opam init` + OCaml 5.3, then `opam install . --deps-only` from the repo.
-- Docker Engine (not Desktop) via `apt install docker.io docker-compose-plugin`.
-- `scripts/cluster-hosts-setup.sh` still applies verbatim — it appends to
-  `/etc/hosts` with the exact same `127.0.0.1 valkey-cN` lines.
-- Delete `AppData/Local/Temp/*.sh` build-wrapper helpers; no longer needed.
-
-First-run sanity steps on Ubuntu:
-
-1. `opam install . --deps-only`
-2. `dune build`
-3. `dune build @runtest` — expect 141/141.
-4. `docker compose up -d` — starts `ocaml-valkey-dev` on `:6379`.
-5. `dune exec test/run_tests.exe -- test 'csc tracking'` — 2 quick tests
-   confirming wire-level CSC works end-to-end before anything cluster.
-6. `docker compose -f docker-compose.cluster.yml up -d` +
-   `bash scripts/cluster-hosts-setup.sh` — if cluster CSC is in scope.
-7. `dune exec test/run_tests.exe -- test csc` — full 26-test CSC slice.
+Release validation assumes a normal Linux development host with
+opam, Docker Engine/Compose, and the local `/etc/hosts` mappings
+installed by `scripts/cluster-hosts-setup.sh`.
 
 ---
 
@@ -259,7 +211,9 @@ implementing.
       opam PR ([#29825](https://github.com/ocaml/opam-repository/pull/29825))
       superseded by 0.3.1 after @jmid caught the `runtest` sandbox
       failure on mTLS test fixtures.
-- [x] **Release `valkey.0.3.1`** — tag pushed; opam PR in flight.
+- [x] **Release `valkey.0.3.1`** — tag pushed; opam PR
+      [#29837](https://github.com/ocaml/opam-repository/pull/29837)
+      merged on 2026-05-02.
       Patch-only: ships committed self-signed fixtures under
       `test/fixtures/mtls/` so opam-sandbox `runtest` no longer
       depends on `scripts/gen-tls-certs.sh`. Live mTLS integration
@@ -289,7 +243,7 @@ implementing.
       `refresh_auth` same / bad / rotated-password paths;
       `bin/iam_smoke/` verified end-to-end against ElastiCache for
       Valkey serverless.
-- [ ] **Phase 11 — Module support.** `Valkey.Search` has landed:
+- [x] **Phase 11 — Module support.** `Valkey.Search` has landed:
       typed `FT.CREATE` schema builders, `FT.SEARCH`,
       `FT.AGGREGATE`, `FT.INFO`, `FT._LIST`, and `FT.DROPINDEX`,
       plus bundle-backed integration coverage and
@@ -302,7 +256,9 @@ implementing.
       `BF.MEXISTS`, `BF.INSERT`, `BF.CARD`, `BF.INFO`, and
       `BF.LOAD`, with pure tests, bundle-backed integration
       coverage, and `examples/13-bloom/`. Per-module opam package
-      or a single `valkey-modules` meta?
+      or a single `valkey-modules` meta can be revisited later; the
+      release-prep decision is to keep wrappers in the core package
+      for v0.4.0.
 - [ ] **Phase 12 — Full audit pass.** Before 1.0.
 
 ### CSC follow-ups (optional)

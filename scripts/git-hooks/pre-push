@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Pre-push gate for ocaml-valkey.
 #
-# Runs: build -> full test suite -> short stability fuzz.
+# Runs: build -> pure test suite -> short stability fuzz.
 # The fuzz is strict: any error fails the push. A standalone Valkey
 # on :6379 is required; a cluster (docker-compose.cluster.yml) is
 # used additionally if it is already up.
+# Full live standalone/cluster/Valkey Bundle validation is part of
+# the release checklist and CI integration job, not every pre-push.
 #
 # Override knobs (env):
 #   SKIP_FUZZ=1           skip the fuzz step
@@ -33,8 +35,8 @@ fail() {
 section "build"
 dune build || fail "build failed"
 
-section "test suite"
-dune runtest --force || fail "tests failed"
+section "pure test suite"
+EIO_BACKEND=posix dune runtest --force || fail "tests failed"
 
 # Parser fuzzer: no external deps, fast, catches regressions that
 # let malformed wire bytes escape as anything other than Parse_error
@@ -53,7 +55,7 @@ else
   if valkey-cli -h localhost -p 6379 PING >/dev/null 2>&1 \
        || redis-cli -h localhost -p 6379 PING >/dev/null 2>&1; then
     section "blocking_pool stress (1000 concurrent BLPOP, max_per_node=100)"
-    STRESS=1 dune exec test/run_tests.exe -- \
+    EIO_BACKEND=posix STRESS=1 dune exec test/run_tests.exe -- \
       test 'blocking_pool stress' \
       || fail "blocking_pool stress reported errors"
   else

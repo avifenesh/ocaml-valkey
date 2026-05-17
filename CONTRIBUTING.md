@@ -15,19 +15,31 @@ eval $(opam env)
 opam install . --deps-only --with-test --with-dev-setup --yes
 ```
 
-Standalone tests only need a single Valkey:
+Build and pure tests do not need a server:
+
+```bash
+dune build
+EIO_BACKEND=posix dune runtest
+```
+
+The full live integration suite needs standalone Valkey, the
+6-node cluster, and Valkey Bundle modules:
 
 ```bash
 docker compose up -d
-dune build && dune runtest
-```
-
-Cluster integration tests need the 6-node compose cluster:
-
-```bash
 sudo bash scripts/cluster-hosts-setup.sh   # once per machine
 docker compose -f docker-compose.cluster.yml up -d
-dune build && dune runtest --force
+docker compose -f docker-compose.search.yml up -d
+EIO_BACKEND=posix \
+  VALKEY_SEARCH_PORT=6381 VALKEY_JSON_PORT=6381 VALKEY_BLOOM_PORT=6381 \
+  dune exec test/run_tests.exe
+```
+
+Package-release checks:
+
+```bash
+opam lint valkey.opam
+EIO_BACKEND=posix opam exec -- dune build -p valkey @install @runtest
 ```
 
 Filter to a subset during iteration:
@@ -167,7 +179,13 @@ the moment the wrapper lands.
 Before opening a PR:
 
 - [ ] `dune build` clean, no warnings-as-errors.
-- [ ] `dune runtest` green against both standalone and cluster.
+- [ ] `EIO_BACKEND=posix dune runtest` green.
+- [ ] Full live suite green with standalone, cluster, and Valkey
+      Bundle services:
+      `EIO_BACKEND=posix VALKEY_SEARCH_PORT=6381 VALKEY_JSON_PORT=6381 VALKEY_BLOOM_PORT=6381 dune exec test/run_tests.exe`.
+- [ ] `opam lint valkey.opam` green.
+- [ ] `EIO_BACKEND=posix opam exec -- dune build -p valkey @install @runtest`
+      green before release-version PRs.
 - [ ] If you touched the wire code: 60 s stability fuzz passes with
       `--max-errors 0`.
 - [ ] If you touched the parser: 1 M strict parser-fuzz iterations

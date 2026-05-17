@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-17
+
 ### Added
 
+- `Valkey.Search` module for Valkey Bundle Search commands:
+  `FT.CREATE`, `FT.SEARCH`, `FT.AGGREGATE`, `FT.INFO`,
+  `FT._LIST`, and `FT.DROPINDEX`, with typed schema/search
+  builders and reply decoders.
+- Bundle-backed Search integration tests and runnable
+  `examples/11-search/`.
 - `Valkey.Json` module for Valkey Bundle JSON commands:
   `JSON.SET`, `JSON.GET`, `JSON.MGET`, `JSON.MSET`,
   `JSON.DEL`, `JSON.FORGET`, `JSON.CLEAR`, `JSON.TYPE`,

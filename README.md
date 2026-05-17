@@ -2,10 +2,12 @@
 
 A modern Valkey client for OCaml 5 + [Eio](https://github.com/ocaml-multicore/eio).
 
-**Status: alpha.** v0.2.0 and v0.3.0 are on opam; v0.3.1 is
-tagged and awaiting opam publish (patch release: opam-sandbox
-`runtest` fix for mTLS test fixtures). Full core + cluster + batch (incl. WATCH
-guards + cross-slot `pfcount_cluster`) + client-side caching
+**Status: alpha, approaching a stable API audit.** v0.3.1 is on
+opam. v0.4.0 is prepared as the Valkey Bundle module release:
+Search, JSON, and Bloom now have typed wrappers, bundle-backed
+integration tests, and runnable examples. Full core + cluster +
+batch (incl. WATCH guards + cross-slot `pfcount_cluster`) +
+client-side caching
 (Default / BCAST / OPTIN, standalone and cluster) + blocking
 pool (BLPOP / BRPOP / BLMOVE / XREAD BLOCK via a per-node lease
 pool) + AWS IAM auth (pure-OCaml SigV4 signer +
@@ -249,14 +251,15 @@ and `Client.spublish` (slot-pinned).
 
 ### Testing, fuzzing, chaos
 
-- **~240 tests** across two targets:
-  - `dune runtest` → 89 pure-unit tests (RESP3, retry state
-    machine, slot / topology / discovery / redirect parsers,
-    command-spec table). No server needed — this is what ships
-    through opam CI.
-  - `dune exec test/run_tests.exe` → the full integration suite
-    (everything that talks to a live Valkey / cluster). Takes
-    ~20 s end-to-end against `docker compose up -d`.
+- **Release gate split**:
+  - `EIO_BACKEND=posix dune runtest` covers pure units with no
+    server dependency.
+  - `EIO_BACKEND=posix dune exec test/run_tests.exe` runs the full
+    live suite when the standalone, cluster, and Valkey Bundle
+    services are up.
+    The current v0.4.0 prep run passed 391 tests, including
+    Search, JSON, and Bloom module integrations against
+    `valkey-bundle`.
 - **Parser fuzzer** (`bin/fuzz_parser/`) — byte-level + tree
   mutation + length-field poisoning + shrinker. 10 M strict
   clean at ~145 k inputs/s.
@@ -471,12 +474,17 @@ docker compose up -d
 sudo bash scripts/cluster-hosts-setup.sh     # one-time: /etc/hosts entries
 docker compose -f docker-compose.cluster.yml up -d
 
+# Optional: start Valkey Bundle modules on :6381 for Search/JSON/Bloom tests
+docker compose -f docker-compose.search.yml up -d
+
 # Build everything + pure-unit tests (no server needed)
 dune build
-dune runtest
+EIO_BACKEND=posix dune runtest
 
 # Full integration suite (needs the docker services above)
-dune exec test/run_tests.exe
+EIO_BACKEND=posix \
+  VALKEY_SEARCH_PORT=6381 VALKEY_JSON_PORT=6381 VALKEY_BLOOM_PORT=6381 \
+  dune exec test/run_tests.exe
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer
@@ -508,12 +516,14 @@ Four layers, bottom up:
 
 ## Pre-push gate
 
-`scripts/git-hooks/pre-push` runs `dune build`, the full test
-suite, the parser fuzz at 100 k iterations (strict), the
-blocking-pool stress test (1000 concurrent `BLPOP` callers,
-`max_per_node=100`), and a 30-second stability fuzz (both
-standalone and, if up, the cluster) with a **zero-error
-threshold**. Set it up once:
+`scripts/git-hooks/pre-push` runs `dune build`, the pure test
+suite with `EIO_BACKEND=posix`, the parser fuzz at 100 k
+iterations (strict), the blocking-pool stress test (1000
+concurrent `BLPOP` callers, `max_per_node=100`), and a
+30-second stability fuzz (both standalone and, if up, the
+cluster) with a **zero-error threshold**. The full live
+standalone/cluster/Valkey Bundle suite remains a release/CI gate.
+Set it up once:
 
 ```sh
 bash scripts/install-git-hooks.sh
@@ -547,8 +557,8 @@ state:
   [ROADMAP.md](ROADMAP.md))
 - ✅ Phase 10 — IAM (SigV4 signer + 10-min refresh provider) +
   mTLS (`Tls_config.with_client_cert`)
-- ⏳ Phase 11 — module support (`Valkey.Search`, `Valkey.Json`,
-  and `Valkey.Bloom` landed; package-split decision remains)
+- ✅ Phase 11 — module support (`Valkey.Search`, `Valkey.Json`,
+  and `Valkey.Bloom`)
 - ⏳ Phase 12 — deep audit → 1.0.0 stable
 
 ## License

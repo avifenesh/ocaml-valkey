@@ -17,10 +17,10 @@
 
 (package
  (name valkey)
- (version 0.3.1)
+ (version 0.4.0)
  (synopsis "Modern Valkey client for OCaml 5 + Eio (RESP3-only)")
  (description
-  "Eio-native Valkey client targeting OCaml 5.3+ and Valkey 7.2+ (including Valkey 8.1 / 9 additions: SET IFEQ, DELIFEQ, hash field TTL). RESP3 only; no Lwt/Async/legacy fallback. Connection layer has auto-reconnect, byte-budget backpressure, circuit breaker, keepalive, TLS, and optional domain split so the parser can't stall socket I/O. Cluster router with quorum-based topology discovery, MOVED/ASK/CLUSTERDOWN/TRYAGAIN retry, periodic refresh, and Read_from-aware replica routing (incl. AZ affinity).")
+  "Eio-native Valkey client targeting OCaml 5.3+ and Valkey 7.2+ (including Valkey 8.1 / 9 additions: SET IFEQ, DELIFEQ, hash field TTL). RESP3 only; no Lwt/Async/legacy fallback. Connection layer has auto-reconnect, byte-budget backpressure, circuit breaker, keepalive, TLS, and optional domain split so the parser can't stall socket I/O. Cluster router with quorum-based topology discovery, MOVED/ASK/CLUSTERDOWN/TRYAGAIN retry, periodic refresh, and Read_from-aware replica routing (incl. AZ affinity). Valkey Bundle module wrappers cover Search, JSON, and Bloom.")
  (tags ("valkey" "redis" "eio" "client" "resp3" "cluster"))
  (depends
   (ocaml (>= 5.3.0))
