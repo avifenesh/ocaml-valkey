@@ -8,6 +8,7 @@
     edge case lands in one place. *)
 
 module Conn = Valkey.Connection
+module R = Valkey.Resp3
 
 let seeds = [ "valkey-c1", 7000; "valkey-c2", 7001; "valkey-c3", 7002 ]
 
@@ -44,6 +45,68 @@ let skipped name =
 let sleep_ms env ms =
   Eio.Time.sleep (Eio.Stdenv.clock env) (ms /. 1000.0)
 
+(* Block until every seed reports a healthy cluster and discovery
+   reaches full agreement. A TCP-level reachable check is not enough
+   after compose startup, failover, or docker restart: individual
+   nodes can accept commands while gossip still has transiently
+   different slot owners. *)
+let wait_cluster_ready env =
+  Eio.Switch.run @@ fun sw ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let deadline = Eio.Time.now clock +. 30.0 in
+  let info_ok host port =
+    try
+      let conn =
+        Conn.connect ~sw ~net ~clock ~config:Conn.Config.default
+          ~host ~port ()
+      in
+      let r = Conn.request conn [| "CLUSTER"; "INFO" |] in
+      Conn.close conn;
+      match r with
+      | Ok (R.Bulk_string s | R.Verbatim_string { data = s; _ }
+            | R.Simple_string s) ->
+          let has line =
+            String.length s >= String.length line
+            && (let rec scan i =
+                  if i + String.length line > String.length s then false
+                  else if String.sub s i (String.length line) = line then true
+                  else scan (i + 1)
+                in
+                scan 0)
+          in
+          has "cluster_state:ok\r\n"
+          && has "cluster_slots_assigned:16384\r\n"
+          && has "cluster_slots_ok:16384\r\n"
+      | _ -> false
+    with _ -> false
+  in
+  let discovery_agrees () =
+    try
+      match
+        Valkey.Discovery.discover_from_seeds
+          ~sw ~net ~clock
+          ~connection_config:Conn.Config.default
+          ~agreement_ratio:1.0
+          ~min_nodes_for_quorum:(List.length seeds)
+          ~seeds ()
+      with
+      | Ok _ -> true
+      | Error _ -> false
+    with _ -> false
+  in
+  let rec wait () =
+    if List.for_all (fun (h, p) -> info_ok h p) seeds
+       && discovery_agrees ()
+    then ()
+    else if Eio.Time.now clock >= deadline then
+      Alcotest.fail
+        "cluster did not reach steady state within 30s; check \
+         `docker compose -f docker-compose.cluster.yml ps`"
+    else (Eio.Time.sleep clock 0.2; wait ())
+  in
+  wait ()
+
 (* ---------- CLUSTER NODES parsing ------------------------------
 
    Each line: <id> <host:port@bus[,hostname]> <flags>
@@ -55,8 +118,6 @@ let sleep_ms env ms =
    appear on master lines. *)
 
 module Cluster_nodes = struct
-  module R = Valkey.Resp3
-
   (* "host:port@bus[,hostname]" -> (host, port). The first
      comma-separated chunk is the announced address; the
      hostname suffix is for downstream resolution and isn't

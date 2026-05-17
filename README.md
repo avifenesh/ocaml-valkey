@@ -126,6 +126,10 @@ No Lwt compat layer. No legacy Redis support.
 - **Named / registered commands** via `Named_commands`: register
   a template once (`[| "HSET"; "$1"; "$2"; "$3" |]`) and invoke
   by name; same for named transactions.
+- **Valkey modules**: `Valkey.Search` wraps Search indexes and
+  queries; `Valkey.Json` wraps production JSON document commands
+  while leaving JSON parsing to the caller's
+  preferred codec.
 
 ### Batch (scatter-gather + atomic)
 
@@ -542,8 +546,8 @@ state:
   [ROADMAP.md](ROADMAP.md))
 - ✅ Phase 10 — IAM (SigV4 signer + 10-min refresh provider) +
   mTLS (`Tls_config.with_client_cert`)
-- ⏳ Phase 11 — module support (`Valkey.Search` landed; JSON /
-  Bloom pending)
+- ⏳ Phase 11 — module support (`Valkey.Search` and `Valkey.Json`
+  landed; Bloom pending)
 - ⏳ Phase 12 — deep audit → 1.0.0 stable
 
 ## License

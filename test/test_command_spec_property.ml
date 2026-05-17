@@ -146,37 +146,13 @@ let random_cluster_myid ~client ~read_from =
   | Error e ->
       Alcotest.failf "CLUSTER MYID via Random: %a" err_pp e
 
-let cluster_nodes_text client =
-  match C.custom ~target:R.Target.Random client [| "CLUSTER"; "NODES" |] with
-  | Ok (Valkey.Resp3.Bulk_string s)
-  | Ok (Valkey.Resp3.Simple_string s)
-  | Ok (Valkey.Resp3.Verbatim_string { data = s; _ }) -> s
-  | Ok other ->
-      Alcotest.failf "CLUSTER NODES returned %a" Valkey.Resp3.pp other
-  | Error e -> Alcotest.failf "CLUSTER NODES: %a" err_pp e
-
-let replica_ids_from_cluster_nodes text =
-  let has_role_flag wanted flags =
-    String.split_on_char ',' flags
-    |> List.exists wanted
-  in
-  let is_replica_flag flag = flag = "slave" || flag = "replica" in
-  String.split_on_char '\n' text
-  |> List.filter_map (fun line ->
-         match String.split_on_char ' ' line with
-         | id :: _addr :: flags :: _
-           when has_role_flag is_replica_flag flags -> Some id
-         | _ -> None)
-
-let primary_ids_from_cluster_nodes text =
-  let is_primary_flag flag = flag = "master" || flag = "primary" in
-  String.split_on_char '\n' text
-  |> List.filter_map (fun line ->
-         match String.split_on_char ' ' line with
-         | id :: _addr :: flags :: _
-           when String.split_on_char ',' flags
-                |> List.exists is_primary_flag -> Some id
-         | _ -> None)
+let live_node_ids ~client fan =
+  C.custom_multi ~fan client [| "PING" |]
+  |> List.filter_map (fun (id, reply) ->
+         match reply with
+         | Ok (Valkey.Resp3.Simple_string "PONG")
+         | Ok (Valkey.Resp3.Bulk_string "PONG") -> Some id
+         | Ok _ | Error _ -> None)
 
 let test_read_from_respected () =
   with_cluster_router @@ fun ~router ~client ->
@@ -235,9 +211,8 @@ let test_read_from_respected () =
 
 let test_random_target_respects_read_from () =
   with_cluster_router @@ fun ~router:_ ~client ->
-  let nodes_text = cluster_nodes_text client in
-  let primary_ids = primary_ids_from_cluster_nodes nodes_text in
-  let replica_ids = replica_ids_from_cluster_nodes nodes_text in
+  let primary_ids = live_node_ids ~client R.Fan_target.All_primaries in
+  let replica_ids = live_node_ids ~client R.Fan_target.All_replicas in
   let primary_hits =
     List.init 8 (fun _ ->
         random_cluster_myid ~client ~read_from:R.Read_from.Primary)

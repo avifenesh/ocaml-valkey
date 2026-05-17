@@ -379,6 +379,30 @@ let one_word : (string * t) list =
     "GEOSEARCH", rk 1;
     "GEOSEARCHSTORE", mw 1;  (* dest src … *)
 
+    (* ---------- Valkey JSON module ---------- *)
+    "JSON.ARRAPPEND", wk 1;
+    "JSON.ARRINDEX", rk 1;
+    "JSON.ARRINSERT", wk 1;
+    "JSON.ARRLEN", rk 1;
+    "JSON.ARRPOP", wk 1;
+    "JSON.ARRTRIM", wk 1;
+    "JSON.CLEAR", wk 1;
+    "JSON.DEL", wk 1;
+    "JSON.FORGET", wk 1;
+    "JSON.GET", rk 1;
+    "JSON.MGET", mr 1;
+    "JSON.MSET", mw 1;
+    "JSON.NUMINCRBY", wk 1;
+    "JSON.NUMMULTBY", wk 1;
+    "JSON.OBJKEYS", rk 1;
+    "JSON.OBJLEN", rk 1;
+    "JSON.RESP", rk 1;
+    "JSON.SET", wk 1;
+    "JSON.STRAPPEND", wk 1;
+    "JSON.STRLEN", rk 1;
+    "JSON.TOGGLE", wk 1;
+    "JSON.TYPE", rk 1;
+
     (* ---------- scripting ---------- *)
     "EVAL", Single_key { key_index = 3; readonly = false };
     "EVALSHA", Single_key { key_index = 3; readonly = false };

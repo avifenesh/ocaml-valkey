@@ -70,12 +70,13 @@ jobs:
             sleep 2
           done
 
-      - name: Start Valkey bundle search
+      - name: Start Valkey bundle modules
         run: |
           docker compose -f docker-compose.search.yml up -d
           for i in $(seq 1 45); do
-            if docker compose -f docker-compose.search.yml exec -T valkey-bundle valkey-cli -p 6379 FT._LIST >/dev/null 2>&1; then
-              echo "search bundle up"; break
+            if docker compose -f docker-compose.search.yml exec -T valkey-bundle valkey-cli -p 6379 FT._LIST >/dev/null 2>&1 \
+              && docker compose -f docker-compose.search.yml exec -T valkey-bundle valkey-cli -p 6379 JSON.TYPE __missing__ >/dev/null 2>&1; then
+              echo "module bundle up"; break
             fi
             if [ "$i" = "45" ]; then
               docker logs ocaml-valkey-bundle || true
@@ -89,7 +90,7 @@ jobs:
           # Wipe any stale bisect files from previous runs.
           find . -name '*.coverage' -delete || true
           opam exec -- dune runtest --instrument-with bisect_ppx --force
-          EIO_BACKEND=posix VALKEY_SEARCH_PORT=6381 \
+          EIO_BACKEND=posix VALKEY_SEARCH_PORT=6381 VALKEY_JSON_PORT=6381 \
             opam exec -- dune exec --instrument-with bisect_ppx --force \
             test/run_tests.exe
 
