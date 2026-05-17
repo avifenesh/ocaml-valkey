@@ -92,6 +92,12 @@ let parse_json (src : string) : (string * value) list list =
     try float_of_string s
     with _ -> err (Printf.sprintf "bad number %S" s)
   in
+  let expect_literal lit =
+    let len = String.length lit in
+    if !pos + len > n || String.sub src !pos len <> lit then
+      err (Printf.sprintf "expected %s" lit);
+    pos := !pos + len
+  in
   let rec read_value () =
     skip_ws ();
     if !pos >= n then err "unexpected eof";
@@ -114,6 +120,43 @@ let parse_json (src : string) : (string * value) list list =
       end
     done;
     List.rev !fields
+  and skip_value () =
+    skip_ws ();
+    if !pos >= n then err "unexpected eof";
+    match src.[!pos] with
+    | '"' -> ignore (read_string ())
+    | '{' -> skip_object ()
+    | '[' -> skip_array ()
+    | 't' -> expect_literal "true"
+    | 'f' -> expect_literal "false"
+    | 'n' -> expect_literal "null"
+    | _ -> ignore (read_number ())
+  and skip_object () =
+    expect '{';
+    let loop = ref true in
+    while !loop do
+      skip_ws ();
+      if !pos < n && src.[!pos] = '}' then begin
+        incr pos;
+        loop := false
+      end else begin
+        ignore (read_string ());
+        skip_ws ();
+        expect ':';
+        skip_value ()
+      end
+    done
+  and skip_array () =
+    expect '[';
+    let loop = ref true in
+    while !loop do
+      skip_ws ();
+      if !pos < n && src.[!pos] = ']' then begin
+        incr pos;
+        loop := false
+      end else
+        skip_value ()
+    done
   and read_array () =
     expect '[';
     let items = ref [] in
@@ -125,14 +168,30 @@ let parse_json (src : string) : (string * value) list list =
     done;
     List.rev !items
   in
-  (* Root is { "scenarios": [ ... ] }. *)
+  (* Root is an object. Current bench output includes metadata fields
+     before [scenarios], and older files may not keep a stable order. *)
   skip_ws ();
   expect '{';
-  skip_ws ();
-  let _k = read_string () in
-  skip_ws ();
-  expect ':';
-  read_array ()
+  let scenarios = ref None in
+  let loop = ref true in
+  while !loop do
+    skip_ws ();
+    if !pos < n && src.[!pos] = '}' then begin
+      incr pos;
+      loop := false
+    end else begin
+      let key = read_string () in
+      skip_ws ();
+      expect ':';
+      if key = "scenarios" then
+        scenarios := Some (read_array ())
+      else
+        skip_value ()
+    end
+  done;
+  match !scenarios with
+  | Some xs -> xs
+  | None -> err "missing scenarios field"
 
 let field_num fields k =
   match List.assoc_opt k fields with
