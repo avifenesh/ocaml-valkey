@@ -1,10 +1,57 @@
 module S = Valkey.Search
 module R = Valkey.Resp3
 module E = Valkey.Connection.Error
+module C = Valkey.Client
+module Router = Valkey.Router
+module T = Valkey.Router.Target
+module RF = Valkey.Router.Read_from
 
 let array_check name expected actual =
   Alcotest.(check (list string)) name (Array.to_list expected)
     (Array.to_list actual)
+
+let fake_client ?error ?(reply = R.Null) () =
+  let seen = ref None in
+  let exec ?timeout:_ target rf args =
+    seen := Some (target, rf, Array.to_list args);
+    match error with
+    | Some e -> Error e
+    | None -> Ok reply
+  in
+  let exec_multi ?timeout:_ _fan _args = [] in
+  let pair ?timeout:_ _target _args1 _args2 =
+    Error (E.Terminal "unused")
+  in
+  let router =
+    Router.make ~exec ~exec_multi ~pair ~close:(fun () -> ())
+      ~primary:(fun () -> None)
+      ~connection_for_slot:(fun _ -> None)
+      ~endpoint_for_slot:(fun _ -> None)
+      ~endpoint_for_node:(fun ~node_id:_ -> None)
+      ~all_connections:(fun () -> [])
+      ~is_standalone:false
+      ~atomic_lock_for_slot:(fun _ -> Eio.Mutex.create ())
+  in
+  (C.from_router ~config:C.Config.default router, seen)
+
+let check_seen name ~read_from ~args seen =
+  match !seen with
+  | Some (T.Random, rf, got) when rf = read_from && got = args -> ()
+  | Some _ ->
+      Alcotest.fail
+        (name ^ " routed with unexpected target/read policy/args")
+  | None -> Alcotest.fail (name ^ " did not call fake router")
+
+let expect_protocol_violation name = function
+  | Error (E.Protocol_violation _) -> ()
+  | Ok _ -> Alcotest.fail (name ^ " should reject the reply shape")
+  | Error e ->
+      Alcotest.failf "%s: expected protocol violation, got %a" name E.pp e
+
+let expect_terminal name = function
+  | Error (E.Terminal "wire closed") -> ()
+  | Ok _ -> Alcotest.fail (name ^ " should pass through transport errors")
+  | Error e -> Alcotest.failf "%s: unexpected transport error %a" name E.pp e
 
 let test_create_args_full_schema () =
   let options : S.create_options =
@@ -47,6 +94,30 @@ let test_create_args_full_schema () =
        "$.embedding"; "VECTOR"; "HNSW"; "12"; "TYPE"; "FLOAT32";
        "DIM"; "3"; "DISTANCE_METRIC"; "COSINE"; "M"; "8";
        "EF_CONSTRUCTION"; "100"; "EF_RUNTIME"; "20";
+    |]
+    args
+
+let test_create_args_additional_variants () =
+  let options =
+    { S.default_create_options with stopwords = No_stopwords }
+  in
+  let schema =
+    [ S.text ~suffix_trie:S.With_suffix_trie "title";
+      S.vector_flat "embedding" ~dim:2 ~distance_metric:S.L2;
+      S.vector_hnsw "ann" ~dim:8 ~distance_metric:S.Ip
+        ~initial_cap:128;
+    ]
+  in
+  let args = S.For_testing.create_args ~options ~index:"idx:more" ~schema in
+  array_check "FT.CREATE extra variants"
+    [| "FT.CREATE"; "idx:more"; "ON"; "HASH";
+       "NOSTOPWORDS";
+       "SCHEMA";
+       "title"; "TEXT"; "WITHSUFFIXTRIE";
+       "embedding"; "VECTOR"; "FLAT"; "6"; "TYPE"; "FLOAT32";
+       "DIM"; "2"; "DISTANCE_METRIC"; "L2";
+       "ann"; "VECTOR"; "HNSW"; "8"; "TYPE"; "FLOAT32";
+       "DIM"; "8"; "DISTANCE_METRIC"; "IP"; "INITIAL_CAP"; "128";
     |]
     args
 
@@ -103,6 +174,27 @@ let test_search_args () =
        "TIMEOUT"; "250";
        "VERBATIM";
        "WITHSORTKEYS";
+    |]
+    args
+
+let test_search_args_return_none_and_sort_without_direction () =
+  let options =
+    { S.default_search_options with
+      no_content = true;
+      return_fields = Some [];
+      sort_by = Some (S.search_sort "score");
+    }
+  in
+  let args =
+    S.For_testing.search_args ~options ~index:"idx:books"
+      ~query:"*"
+  in
+  array_check "FT.SEARCH args with empty return and default sort"
+    [| "FT.SEARCH"; "idx:books"; "*";
+       "ALLSHARDS"; "CONSISTENT";
+       "NOCONTENT";
+       "RETURN"; "0";
+       "SORTBY"; "score";
     |]
     args
 
@@ -215,6 +307,111 @@ let test_decode_search_resp3_map_fields () =
   | Ok _ -> Alcotest.fail "unexpected RESP3 map search result"
   | Error e -> Alcotest.failf "decode map fields: %a" E.pp e
 
+let test_search_wrappers_route_and_decode () =
+  let client, seen = fake_client ~reply:(R.Bulk_string "OK") () in
+  (match S.create client ~index:"idx" ~schema:[ S.text "title" ] with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "FT.CREATE: %a" E.pp e);
+  check_seen "FT.CREATE" ~read_from:RF.Primary
+    ~args:[ "FT.CREATE"; "idx"; "ON"; "HASH"; "SCHEMA"; "title"; "TEXT" ]
+    seen;
+
+  let client, seen = fake_client ~reply:(R.Simple_string "OK") () in
+  (match S.drop_index client "idx" with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "FT.DROPINDEX: %a" E.pp e);
+  check_seen "FT.DROPINDEX" ~read_from:RF.Primary
+    ~args:[ "FT.DROPINDEX"; "idx" ] seen;
+
+  let client, seen =
+    fake_client
+      ~reply:
+        (R.Set
+           [ R.Bulk_string "idx";
+             R.Simple_string "other";
+             R.Verbatim_string { encoding = "txt"; data = "verbatim" };
+           ])
+      ()
+  in
+  (match S.list_indexes ~read_from:RF.Prefer_replica client with
+   | Ok [ "idx"; "other"; "verbatim" ] -> ()
+   | Ok indexes ->
+       Alcotest.failf "unexpected FT._LIST payload: %s"
+         (String.concat "," indexes)
+   | Error e -> Alcotest.failf "FT._LIST: %a" E.pp e);
+  check_seen "FT._LIST" ~read_from:RF.Prefer_replica
+    ~args:[ "FT._LIST" ] seen;
+
+  let client, seen =
+    fake_client
+      ~reply:
+        (R.Map
+           [ R.Bulk_string "index_name", R.Bulk_string "idx";
+             R.Bulk_string "num_docs", R.Integer 2L;
+           ])
+      ()
+  in
+  let info_options =
+    { S.scope = Cluster;
+      shard_policy = Some_shards;
+      consistency = Inconsistent;
+    }
+  in
+  (match S.info_raw ~read_from:RF.Prefer_replica ~options:info_options client "idx" with
+   | Ok [ "index_name", R.Bulk_string "idx"; "num_docs", R.Integer 2L ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected FT.INFO payload"
+   | Error e -> Alcotest.failf "FT.INFO: %a" E.pp e);
+  check_seen "FT.INFO" ~read_from:RF.Prefer_replica
+    ~args:[ "FT.INFO"; "idx"; "CLUSTER"; "SOMESHARDS"; "INCONSISTENT" ]
+    seen;
+
+  let client, seen =
+    fake_client
+      ~reply:
+        (R.Array
+           [ R.Integer 1L;
+             R.Bulk_string "doc:1";
+             R.Array [ R.Bulk_string "title"; R.Bulk_string "peace" ];
+           ])
+      ()
+  in
+  (match S.search ~read_from:RF.Prefer_replica client ~index:"idx" ~query:"*" with
+   | Ok { total = 1L; documents = [ { key = "doc:1"; _ } ] } -> ()
+   | Ok _ -> Alcotest.fail "unexpected FT.SEARCH payload"
+   | Error e -> Alcotest.failf "FT.SEARCH: %a" E.pp e);
+  check_seen "FT.SEARCH" ~read_from:RF.Prefer_replica
+    ~args:[ "FT.SEARCH"; "idx"; "*"; "ALLSHARDS"; "CONSISTENT" ]
+    seen;
+
+  let client, seen =
+    fake_client
+      ~reply:
+        (R.Array
+           [ R.Integer 1L;
+             R.Array [ R.Bulk_string "count"; R.Integer 1L ];
+           ])
+      ()
+  in
+  (match S.aggregate client ~index:"idx" ~query:"*" with
+   | Ok { rows = [ [ "count", R.Integer 1L ] ]; _ } -> ()
+   | Ok _ -> Alcotest.fail "unexpected FT.AGGREGATE payload"
+   | Error e -> Alcotest.failf "FT.AGGREGATE: %a" E.pp e);
+  check_seen "FT.AGGREGATE" ~read_from:RF.Primary
+    ~args:[ "FT.AGGREGATE"; "idx"; "*" ] seen
+
+let test_search_wrappers_pass_through_transport_errors () =
+  let transport = E.Terminal "wire closed" in
+  let client, _seen = fake_client ~error:transport () in
+  expect_terminal "FT.CREATE transport"
+    (S.create client ~index:"idx" ~schema:[ S.text "title" ]);
+  expect_terminal "FT.DROPINDEX transport" (S.drop_index client "idx");
+  expect_terminal "FT._LIST transport" (S.list_indexes client);
+  expect_terminal "FT.INFO transport" (S.info_raw client "idx");
+  expect_terminal "FT.SEARCH transport"
+    (S.search client ~index:"idx" ~query:"*");
+  expect_terminal "FT.AGGREGATE transport"
+    (S.aggregate client ~index:"idx" ~query:"*")
+
 let test_decode_search_rejects_odd_fields () =
   let reply =
     R.Array
@@ -228,6 +425,27 @@ let test_decode_search_rejects_odd_fields () =
   | Ok _ -> Alcotest.fail "expected protocol violation"
   | Error e -> Alcotest.failf "expected protocol violation, got %a" E.pp e
 
+let test_decode_search_rejects_more_bad_shapes () =
+  expect_protocol_violation "FT.SEARCH scalar"
+    (S.For_testing.decode_search ~options:S.default_search_options
+       (R.Integer 1L));
+  expect_protocol_violation "FT.SEARCH bad key"
+    (S.For_testing.decode_search ~options:S.default_search_options
+       (R.Array [ R.Integer 1L; R.Integer 42L; R.Array [] ]));
+  let no_content_sort_keys =
+    { S.default_search_options with no_content = true; with_sort_keys = true }
+  in
+  expect_protocol_violation "FT.SEARCH missing sort key"
+    (S.For_testing.decode_search ~options:no_content_sort_keys
+       (R.Array [ R.Integer 1L; R.Bulk_string "doc:1" ]));
+  let with_sort_keys =
+    { S.default_search_options with with_sort_keys = true }
+  in
+  expect_protocol_violation "FT.SEARCH malformed sort-key row"
+    (S.For_testing.decode_search ~options:with_sort_keys
+       (R.Array
+          [ R.Integer 1L; R.Bulk_string "doc:1"; R.Integer 1L ]))
+
 let test_info_raw_decoding () =
   let reply =
     R.Array
@@ -239,6 +457,15 @@ let test_info_raw_decoding () =
   | Ok [ "index_name", R.Bulk_string "idx"; "num_docs", R.Integer 2L ] -> ()
   | Ok _ -> Alcotest.fail "unexpected info pairs"
   | Error e -> Alcotest.failf "info decode: %a" E.pp e
+
+let test_info_raw_rejects_bad_shapes () =
+  expect_protocol_violation "FT.INFO odd array"
+    (S.For_testing.decode_info_raw (R.Array [ R.Bulk_string "index_name" ]));
+  expect_protocol_violation "FT.INFO bad map key"
+    (S.For_testing.decode_info_raw
+       (R.Map [ R.Integer 1L, R.Bulk_string "idx" ]));
+  expect_protocol_violation "FT.INFO scalar"
+    (S.For_testing.decode_info_raw (R.Integer 1L))
 
 let test_aggregate_args_and_decode () =
   let options =
@@ -289,6 +516,70 @@ let test_aggregate_args_and_decode () =
   | Ok _ -> Alcotest.fail "unexpected aggregate result"
   | Error e -> Alcotest.failf "aggregate decode: %a" E.pp e
 
+let test_aggregate_args_additional_variants () =
+  let options : S.aggregate_options =
+    {
+      dialect = Some 3;
+      inorder = true;
+      load = Some S.Load_all;
+      params = [ "needle", "peace" ];
+      slop = Some 2;
+      timeout_ms = Some 100;
+      verbatim = true;
+      stages =
+        [ S.Apply { expression = "upper(@title)"; alias = "TITLE" };
+          S.Filter "@year >= 1900";
+          S.Group_by
+            { fields = [];
+              reducers =
+                [ S.group_reducer (S.Count_distinct "@author");
+                  S.group_reducer (S.Sum "@price");
+                  S.group_reducer (S.Min "@price");
+                  S.group_reducer (S.Max "@price");
+                  S.group_reducer (S.Stddev "@price");
+                  S.group_reducer
+                    (S.Custom_reducer
+                       { name = "QUANTILE"; args = [ "@price"; "0.95" ] });
+                ];
+            };
+          S.Sort_by
+            { fields =
+                [ S.aggregate_sort "@score";
+                  S.aggregate_sort ~direction:S.Asc "@year";
+                ];
+              max = None;
+            };
+          S.Limit { offset = 5; count = 10 };
+        ];
+    }
+  in
+  let args =
+    S.For_testing.aggregate_args ~options ~index:"idx:books"
+      ~query:"@title:$needle"
+  in
+  array_check "FT.AGGREGATE args with extra variants"
+    [| "FT.AGGREGATE"; "idx:books"; "@title:$needle";
+       "DIALECT"; "3";
+       "INORDER";
+       "LOAD"; "*";
+       "PARAMS"; "2"; "needle"; "peace";
+       "SLOP"; "2";
+       "TIMEOUT"; "100";
+       "VERBATIM";
+       "APPLY"; "upper(@title)"; "AS"; "TITLE";
+       "FILTER"; "@year >= 1900";
+       "GROUPBY"; "0";
+       "REDUCE"; "COUNT_DISTINCT"; "1"; "@author";
+       "REDUCE"; "SUM"; "1"; "@price";
+       "REDUCE"; "MIN"; "1"; "@price";
+       "REDUCE"; "MAX"; "1"; "@price";
+       "REDUCE"; "STDDEV"; "1"; "@price";
+       "REDUCE"; "QUANTILE"; "2"; "@price"; "0.95";
+       "SORTBY"; "3"; "@score"; "@year"; "ASC";
+       "LIMIT"; "5"; "10";
+    |]
+    args
+
 let test_decode_aggregate_resp3_map_rows () =
   let reply =
     R.Array
@@ -310,13 +601,24 @@ let test_decode_aggregate_resp3_map_rows () =
   | Ok _ -> Alcotest.fail "unexpected RESP3 map aggregate result"
   | Error e -> Alcotest.failf "aggregate map decode: %a" E.pp e
 
+let test_decode_aggregate_rejects_bad_shapes () =
+  expect_protocol_violation "FT.AGGREGATE scalar"
+    (S.For_testing.decode_aggregate (R.Integer 1L));
+  expect_protocol_violation "FT.AGGREGATE bad row"
+    (S.For_testing.decode_aggregate
+       (R.Array [ R.Integer 1L; R.Integer 2L ]))
+
 let tests =
   [ Alcotest.test_case "FT.CREATE args cover schema options" `Quick
       test_create_args_full_schema;
+    Alcotest.test_case "FT.CREATE args cover extra variants" `Quick
+      test_create_args_additional_variants;
     Alcotest.test_case "VECTOR FLAT attr count" `Quick
       test_vector_flat_arg_count;
     Alcotest.test_case "FT.SEARCH args cover query options" `Quick
       test_search_args;
+    Alcotest.test_case "FT.SEARCH args cover empty return" `Quick
+      test_search_args_return_none_and_sort_without_direction;
     Alcotest.test_case "decode FT.SEARCH with content" `Quick
       test_decode_search_content;
     Alcotest.test_case "decode FT.SEARCH NOCONTENT" `Quick
@@ -327,12 +629,24 @@ let tests =
       test_decode_search_with_sort_keys;
     Alcotest.test_case "decode FT.SEARCH RESP3 map fields" `Quick
       test_decode_search_resp3_map_fields;
+    Alcotest.test_case "Search wrappers route and decode replies" `Quick
+      test_search_wrappers_route_and_decode;
+    Alcotest.test_case "Search wrappers pass through transport errors" `Quick
+      test_search_wrappers_pass_through_transport_errors;
     Alcotest.test_case "decode rejects odd field arrays" `Quick
       test_decode_search_rejects_odd_fields;
+    Alcotest.test_case "decode rejects more bad search shapes" `Quick
+      test_decode_search_rejects_more_bad_shapes;
     Alcotest.test_case "decode FT.INFO raw pairs" `Quick
       test_info_raw_decoding;
+    Alcotest.test_case "decode FT.INFO rejects bad shapes" `Quick
+      test_info_raw_rejects_bad_shapes;
     Alcotest.test_case "FT.AGGREGATE args and decode" `Quick
       test_aggregate_args_and_decode;
+    Alcotest.test_case "FT.AGGREGATE args extra variants" `Quick
+      test_aggregate_args_additional_variants;
     Alcotest.test_case "decode FT.AGGREGATE RESP3 map rows" `Quick
       test_decode_aggregate_resp3_map_rows;
+    Alcotest.test_case "decode FT.AGGREGATE rejects bad shapes" `Quick
+      test_decode_aggregate_rejects_bad_shapes;
   ]
