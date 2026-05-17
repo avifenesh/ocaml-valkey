@@ -58,6 +58,8 @@ let () =
         Test_client_admin.tests;
       "admin family (needs docker valkey :6379)",
         Test_admin_family.tests;
+      "json (pure)", Test_json.tests;
+      "search (pure)", Test_search.tests;
       "json (optional valkey-bundle on :6381)",
         Test_json_integration.tests;
       "search (optional valkey-bundle on :6381)",
