@@ -454,6 +454,10 @@ let test_decode_obj_keys () =
   | Error e -> Alcotest.failf "decode obj keys: %a" E.pp e
 
 let test_decode_obj_key_shapes () =
+  (match J.For_testing.decode_obj_keys (R.Array []) with
+   | Ok [] -> ()
+   | Ok _ -> Alcotest.fail "empty enhanced obj keys should be zero matches"
+   | Error e -> Alcotest.failf "decode empty obj keys: %a" E.pp e);
   (match
      J.For_testing.decode_obj_keys
        (R.Array [ R.Bulk_string "name"; R.Simple_string "age" ])

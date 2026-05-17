@@ -144,6 +144,8 @@ val arr_pop :
   Client.t ->
   key:string ->
   (string option list, Connection.Error.t) result
+(** [JSON.ARRPOP]. If [index] is provided but [path] is omitted, the
+    command uses [$] so Valkey receives a valid path/index pair. *)
 
 val arr_trim :
   ?timeout:float ->

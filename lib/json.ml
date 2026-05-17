@@ -128,7 +128,8 @@ let decode_obj_keys = function
   | R.Null -> Ok [ None ]
   | R.Array items ->
       let enhanced =
-        List.exists
+        items = []
+        || List.exists
           (function R.Array _ | R.Null -> true | _ -> false)
           items
       in
