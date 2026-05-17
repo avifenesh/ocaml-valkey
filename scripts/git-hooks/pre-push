@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Pre-push gate for ocaml-valkey.
 #
-# Runs: build -> full test suite -> short stability fuzz.
+# Runs: build -> pure test suite -> short stability fuzz.
 # The fuzz is strict: any error fails the push. A standalone Valkey
 # on :6379 is required; a cluster (docker-compose.cluster.yml) is
 # used additionally if it is already up.
+# Full live standalone/cluster/Valkey Bundle validation is part of
+# the release checklist and CI integration job, not every pre-push.
 #
 # Override knobs (env):
 #   SKIP_FUZZ=1           skip the fuzz step
@@ -21,6 +23,7 @@ if [ "${SKIP_PRE_PUSH:-}" = "1" ]; then
 fi
 
 cd "$(git rev-parse --show-toplevel)"
+export EIO_BACKEND="${EIO_BACKEND:-posix}"
 
 section() {
   printf '\n\033[1;34m== %s ==\033[0m\n' "$1"
@@ -33,7 +36,7 @@ fail() {
 section "build"
 dune build || fail "build failed"
 
-section "test suite"
+section "pure test suite"
 dune runtest --force || fail "tests failed"
 
 # Parser fuzzer: no external deps, fast, catches regressions that

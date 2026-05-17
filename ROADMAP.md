@@ -4,13 +4,12 @@ Elaborated, phased plan toward a public `valkey` package and beyond.
 Each phase is a checkpoint: a self-contained chunk of work with its
 own success criteria. Re-assessed after every phase.
 
-Current tree snapshot: **241 tests passing; Phases 0-7 shipped;
-`valkey.0.2.0` live on opam** (standalone, cluster, transactions,
-batch incl. `with_watch` + cross-slot `pfcount_cluster`, pub/sub
-standalone + cluster-aware with failover replay, named commands,
-stability fuzzer, parser fuzzer, pre-push gate). The phase bodies
-below preserve the original planning text; when the shipped shape
-changed later, the `Shipped.` paragraphs are the current source of
+Current tree snapshot: **v0.3.1 live on opam; v0.4.0 prepared
+with Phase 11 module support**. Search, JSON, and Bloom now have
+typed wrappers, bundle-backed integration tests, and runnable
+examples. The phase bodies below preserve the original planning
+text; when the shipped shape changed later, the `Shipped.`
+paragraphs and [STATUS.md](STATUS.md) are the current source of
 truth. See [README.md](README.md) for the user-facing surface.
 
 ---
@@ -773,7 +772,7 @@ clusters. No secrets in tests.
 
 ---
 
-## Phase 11 — Module support (JSON / Search / Bloom) ⏳ in progress
+## Phase 11 — Module support (JSON / Search / Bloom) ✅ complete
 
 **Goal.** Typed wrappers for the three big Valkey modules so users
 don't have to reach for raw `exec` to use them.
@@ -827,8 +826,8 @@ Each module:
 - JSON, Search, and Bloom wrappers cover the production commands
   available in Valkey Bundle while intentionally excluding
   debug/internal commands.
-- Bloom wrappers get the same command-table, integration-test, and
-  runnable-example treatment before Phase 11 is marked complete.
+- Bloom wrappers have the same command-table, integration-test, and
+  runnable-example treatment as Search and JSON.
 
 **Depends on.** Phase 6 (package-split process established) +
 Phase 5 (examples exist to model after).
@@ -837,8 +836,8 @@ Phase 5 (examples exist to model after).
 
 ## Phase 12 — Full audit (deep pass)
 
-**Goal.** Before 1.0.0 stable. Go through every module with fresh
-eyes now that the surface is complete, look for:
+**Goal.** Before 1.0.0 stable. Review each module now that the
+planned APIs are implemented, looking for:
 
 - Abstractions that leak.
 - API inconsistencies between modules.
