@@ -55,6 +55,11 @@ let expect_protocol_violation name = function
   | Ok _ -> Alcotest.fail (name ^ " should reject the reply shape")
   | Error e -> Alcotest.failf "%s: expected protocol violation, got %a" name E.pp e
 
+let expect_terminal name = function
+  | Error (E.Terminal "wire closed") -> ()
+  | Ok _ -> Alcotest.fail (name ^ " should pass through transport errors")
+  | Error e -> Alcotest.failf "%s: unexpected transport error %a" name E.pp e
+
 let test_set_args () =
   let args =
     J.For_testing.set_args ~path:"$.profile"
@@ -377,6 +382,118 @@ let test_read_overrides_and_scalar_decodes () =
   check_seen "JSON.TYPE override" ~key ~read_from
     ~args:[ "JSON.TYPE"; key ] seen
 
+let test_reply_variants () =
+  let key = "json:1" in
+  let client, seen = fake_client ~reply:(R.Bulk_string "OK") () in
+  (match J.set client ~key "{}" with
+   | Ok true -> ()
+   | Ok false -> Alcotest.fail "JSON.SET bulk OK returned false"
+   | Error e -> Alcotest.failf "JSON.SET bulk OK: %a" E.pp e);
+  check_seen "JSON.SET bulk OK" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.SET"; key; "$"; "{}" ] seen;
+
+  let client, seen = fake_client ~reply:(R.Bulk_string "OK") () in
+  (match J.mset client [ { J.key = key; path = "$"; json = "{}" } ] with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "JSON.MSET bulk OK: %a" E.pp e);
+  check_seen "JSON.MSET bulk OK" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.MSET"; key; "$"; "{}" ] seen;
+
+  let client, seen =
+    fake_client
+      ~reply:(R.Verbatim_string { encoding = "txt"; data = "{\"v\":1}" })
+      ()
+  in
+  (match J.get client ~key with
+   | Ok (Some "{\"v\":1}") -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.GET verbatim payload"
+   | Error e -> Alcotest.failf "JSON.GET verbatim: %a" E.pp e);
+  check_seen "JSON.GET verbatim" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.GET"; key ] seen;
+
+  let client, seen = fake_client ~reply:(R.Array [ R.Integer 2L ]) () in
+  (match J.arr_append client ~key ~path:"$.items" [ "1" ] with
+   | Ok [ Some 2 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRAPPEND result"
+   | Error e -> Alcotest.failf "JSON.ARRAPPEND: %a" E.pp e);
+  check_seen "JSON.ARRAPPEND" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRAPPEND"; key; "$.items"; "1" ] seen;
+
+  let client, seen = fake_client ~reply:R.Null () in
+  (match J.arr_pop client ~key with
+   | Ok [ None ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRPOP null result"
+   | Error e -> Alcotest.failf "JSON.ARRPOP null: %a" E.pp e);
+  check_seen "JSON.ARRPOP null" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRPOP"; key ] seen;
+
+  let client, seen = fake_client ~reply:(R.Integer 0L) () in
+  (match J.arr_trim client ~key ~path:"$.items" ~start:0 ~stop:0 with
+   | Ok [ Some 0 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRTRIM scalar result"
+   | Error e -> Alcotest.failf "JSON.ARRTRIM scalar: %a" E.pp e);
+  check_seen "JSON.ARRTRIM scalar" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRTRIM"; key; "$.items"; "0"; "0" ] seen;
+
+  let client, seen = fake_client ~reply:(R.Boolean false) () in
+  (match J.toggle client ~key ~path:"$.flag" with
+   | Ok [ Some false ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.TOGGLE scalar bool result"
+   | Error e -> Alcotest.failf "JSON.TOGGLE scalar bool: %a" E.pp e);
+  check_seen "JSON.TOGGLE scalar bool" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.TOGGLE"; key; "$.flag" ] seen;
+
+  let client, seen = fake_client ~reply:R.Null () in
+  (match J.type_of client ~key with
+   | Ok [ None ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.TYPE null result"
+   | Error e -> Alcotest.failf "JSON.TYPE null: %a" E.pp e);
+  check_seen "JSON.TYPE null" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.TYPE"; key ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Bulk_string "name" ]) ()
+  in
+  (match J.obj_keys client ~key with
+   | Ok [ Some [ "name" ] ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected restricted JSON.OBJKEYS result"
+   | Error e -> Alcotest.failf "JSON.OBJKEYS restricted: %a" E.pp e);
+  check_seen "JSON.OBJKEYS restricted" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.OBJKEYS"; key ] seen
+
+let test_transport_errors () =
+  let key = "json:1" in
+  let client, _seen = fake_client ~error:(E.Terminal "wire closed") () in
+  expect_terminal "JSON.SET" (J.set client ~key "{}");
+  expect_terminal "JSON.GET" (J.get client ~key);
+  expect_terminal "JSON.MGET" (J.mget client ~keys:[ key ] ~path:"$");
+  expect_terminal "JSON.MSET"
+    (J.mset client [ { J.key = key; path = "$"; json = "{}" } ]);
+  expect_terminal "JSON.DEL" (J.del client ~key);
+  expect_terminal "JSON.FORGET" (J.forget client ~key);
+  expect_terminal "JSON.CLEAR" (J.clear client ~key);
+  expect_terminal "JSON.NUMINCRBY"
+    (J.num_incr_by client ~key ~path:"$.n" 1.0);
+  expect_terminal "JSON.NUMMULTBY"
+    (J.num_mult_by client ~key ~path:"$.n" 2.0);
+  expect_terminal "JSON.ARRAPPEND"
+    (J.arr_append client ~key ~path:"$.items" [ "1" ]);
+  expect_terminal "JSON.ARRINSERT"
+    (J.arr_insert client ~key ~path:"$.items" ~index:0 [ "1" ]);
+  expect_terminal "JSON.ARRLEN" (J.arr_len client ~key);
+  expect_terminal "JSON.ARRPOP" (J.arr_pop client ~key);
+  expect_terminal "JSON.ARRTRIM"
+    (J.arr_trim client ~key ~path:"$.items" ~start:0 ~stop:0);
+  expect_terminal "JSON.ARRINDEX"
+    (J.arr_index client ~key ~path:"$.items" ~json:"1");
+  expect_terminal "JSON.STRLEN" (J.strlen client ~key);
+  expect_terminal "JSON.STRAPPEND" (J.str_append client ~key "\"x\"");
+  expect_terminal "JSON.TOGGLE" (J.toggle client ~key ~path:"$.flag");
+  expect_terminal "JSON.TYPE" (J.type_of client ~key);
+  expect_terminal "JSON.OBJLEN" (J.obj_len client ~key);
+  expect_terminal "JSON.OBJKEYS" (J.obj_keys client ~key);
+  expect_terminal "JSON.RESP" (J.resp client ~key)
+
 let test_decode_get_and_mget () =
   (match J.For_testing.decode_get (R.Bulk_string "[{\"name\":\"ada\"}]") with
    | Ok (Some s) ->
@@ -439,7 +556,10 @@ let test_decode_bool_results () =
 let test_decode_bool_protocol_violation () =
   expect_protocol_violation "JSON.TOGGLE bad integer"
     (J.For_testing.decode_bool_results "JSON.TOGGLE"
-       (R.Array [ R.Integer 2L ]))
+       (R.Array [ R.Integer 2L ]));
+  expect_protocol_violation "JSON.TOGGLE bad bulk"
+    (J.For_testing.decode_bool_results "JSON.TOGGLE"
+       (R.Array [ R.Bulk_string "true" ]))
 
 let test_decode_obj_keys () =
   let reply =
@@ -479,14 +599,20 @@ let test_decode_obj_key_shapes () =
   expect_protocol_violation "JSON.OBJKEYS bad key"
     (J.For_testing.decode_obj_keys
        (R.Array [ R.Array [ R.Integer 1L ] ]));
+  expect_protocol_violation "JSON.OBJKEYS bad enhanced item"
+    (J.For_testing.decode_obj_keys
+       (R.Array [ R.Array [ R.Bulk_string "ok" ]; R.Bulk_string "bad" ]));
   expect_protocol_violation "JSON.OBJKEYS bad top-level"
     (J.For_testing.decode_obj_keys (R.Integer 1L))
 
 let test_decode_protocol_violation () =
-  match J.For_testing.decode_mget (R.Integer 1L) with
-  | Error (E.Protocol_violation _) -> ()
-  | Ok _ -> Alcotest.fail "expected protocol violation"
-  | Error e -> Alcotest.failf "expected protocol violation, got %a" E.pp e
+  expect_protocol_violation "JSON.MGET bad top-level"
+    (J.For_testing.decode_mget (R.Integer 1L));
+  expect_protocol_violation "JSON.MGET bad item"
+    (J.For_testing.decode_mget (R.Array [ R.Integer 1L ]));
+  expect_protocol_violation "JSON.ARRLEN bad item"
+    (J.For_testing.decode_int_results "JSON.ARRLEN"
+       (R.Array [ R.Bulk_string "bad" ]))
 
 let test_decode_rejects_integer_overflow () =
   (match
@@ -591,6 +717,9 @@ let tests =
       test_string_object_and_resp_commands;
     Alcotest.test_case "JSON read overrides and scalar decodes" `Quick
       test_read_overrides_and_scalar_decodes;
+    Alcotest.test_case "JSON reply variants" `Quick test_reply_variants;
+    Alcotest.test_case "JSON transport errors" `Quick
+      test_transport_errors;
     Alcotest.test_case "decode JSON.GET and JSON.MGET" `Quick
       test_decode_get_and_mget;
     Alcotest.test_case "decode JSON string shapes" `Quick
