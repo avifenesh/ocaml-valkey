@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `JSON.TOGGLE`, and raw `JSON.RESP`.
 - Bundle-backed JSON integration tests and runnable
   `examples/12-json/`.
+- `Valkey.Bloom` module for Valkey Bundle Bloom filter commands:
+  `BF.RESERVE`, `BF.ADD`, `BF.MADD`, `BF.EXISTS`, `BF.MEXISTS`,
+  `BF.INSERT`, `BF.CARD`, `BF.INFO`, and `BF.LOAD`.
+- Bundle-backed Bloom integration tests and runnable
+  `examples/13-bloom/`.
 
 ## [0.3.1] — 2026-05-01
 

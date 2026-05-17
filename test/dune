@@ -19,6 +19,7 @@
           test_inflight
           test_json
           test_search
+          test_bloom
           test_csc_optin_unit
           test_observability
           test_iam_sigv4
@@ -83,6 +84,8 @@
           test_json
           test_json_integration
           test_search
+          test_bloom
+          test_bloom_integration
           test_iam_sigv4
           test_iam_provider
           test_mtls_config)

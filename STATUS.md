@@ -297,9 +297,12 @@ implementing.
       production JSON commands including `JSON.MSET`, object, array,
       string, and number mutations, `JSON.FORGET`, `JSON.CLEAR`, and raw
       `JSON.RESP`, with pure tests, bundle-backed integration
-      coverage, and `examples/12-json/`. `valkey-bloom` remains
-      pending. Per-module opam package or a single `valkey-modules`
-      meta?
+      coverage, and `examples/12-json/`. `Valkey.Bloom` has landed
+      for `BF.RESERVE`, `BF.ADD`, `BF.MADD`, `BF.EXISTS`,
+      `BF.MEXISTS`, `BF.INSERT`, `BF.CARD`, `BF.INFO`, and
+      `BF.LOAD`, with pure tests, bundle-backed integration
+      coverage, and `examples/13-bloom/`. Per-module opam package
+      or a single `valkey-modules` meta?
 - [ ] **Phase 12 — Full audit pass.** Before 1.0.
 
 ### CSC follow-ups (optional)

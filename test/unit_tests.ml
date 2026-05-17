@@ -19,6 +19,7 @@ let () =
       "inflight", Test_inflight.tests;
       "json (pure)", Test_json.tests;
       "search (pure)", Test_search.tests;
+      "bloom (pure)", Test_bloom.tests;
       "csc optin (pure)", Test_csc_optin_unit.tests;
       "observability (pure)", Test_observability.tests;
       "iam sigv4 (pure)", Test_iam_sigv4.tests;
