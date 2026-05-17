@@ -10,11 +10,13 @@ let array_check name expected actual =
   Alcotest.(check (list string)) name (Array.to_list expected)
     (Array.to_list actual)
 
-let fake_client ?(reply = R.Null) ?(read_from = RF.Primary) () =
+let fake_client ?error ?(reply = R.Null) ?(read_from = RF.Primary) () =
   let seen = ref None in
   let exec ?timeout:_ target rf args =
     seen := Some (target, rf, Array.to_list args);
-    Ok reply
+    match error with
+    | Some e -> Error e
+    | None -> Ok reply
   in
   let exec_multi ?timeout:_ _fan _args = [] in
   let pair ?timeout:_ _target _args1 _args2 =
@@ -47,6 +49,11 @@ let expect_invalid_arg name f =
   match f () with
   | exception Invalid_argument _ -> ()
   | _ -> Alcotest.fail (name ^ " should reject invalid input")
+
+let expect_protocol_violation name = function
+  | Error (E.Protocol_violation _) -> ()
+  | Ok _ -> Alcotest.fail (name ^ " should reject the reply shape")
+  | Error e -> Alcotest.failf "%s: expected protocol violation, got %a" name E.pp e
 
 let test_set_args () =
   let args =
@@ -98,6 +105,25 @@ let test_arr_append_args () =
     [| "JSON.ARRAPPEND"; "user:1"; "$.tags"; "\"math\""; "\"logic\"" |]
     args
 
+let test_set_conditions_and_reply_shapes () =
+  let args =
+    J.For_testing.set_args ~condition:J.If_exists ~key:"user:1"
+      "{\"name\":\"ada\"}"
+  in
+  array_check "JSON.SET XX args"
+    [| "JSON.SET"; "user:1"; "$"; "{\"name\":\"ada\"}"; "XX" |]
+    args;
+  let client, seen = fake_client ~reply:R.Null () in
+  (match J.set client ~condition:J.If_exists ~key:"user:1" "{}" with
+   | Ok false -> ()
+   | Ok true -> Alcotest.fail "JSON.SET condition should return false"
+   | Error e -> Alcotest.failf "JSON.SET conditional: %a" E.pp e);
+  check_seen "JSON.SET XX" ~key:"user:1" ~read_from:RF.Primary
+    ~args:[ "JSON.SET"; "user:1"; "$"; "{}"; "XX" ] seen;
+  let client, _seen = fake_client ~reply:(R.Integer 1L) () in
+  expect_protocol_violation "JSON.SET bad reply"
+    (J.set client ~key:"user:1" "{}")
+
 let test_mset_args_and_empty_input () =
   let key = "json:{1}:a" in
   let client, seen = fake_client ~reply:(R.Simple_string "OK") () in
@@ -124,7 +150,11 @@ let test_mset_args_and_empty_input () =
       ]
     seen;
   expect_invalid_arg "JSON.MSET empty" (fun () ->
-      ignore (J.mset client []))
+      ignore (J.mset client []));
+  let client, _seen = fake_client ~reply:R.Null () in
+  expect_protocol_violation "JSON.MSET bad reply"
+    (J.mset client
+       [ { J.key = key; path = "$"; json = "{\"name\":\"ada\"}" } ])
 
 let test_key_path_and_number_commands () =
   let key = "json:1" in
@@ -151,6 +181,26 @@ let test_key_path_and_number_commands () =
    | Error e -> Alcotest.failf "JSON.NUMMULTBY: %a" E.pp e);
   check_seen "JSON.NUMMULTBY" ~key ~read_from:RF.Primary
     ~args:[ "JSON.NUMMULTBY"; key; "$.age"; "2" ] seen
+
+let test_protocol_violations_and_errors () =
+  let key = "json:1" in
+  let transport = E.Terminal "wire closed" in
+  let client, _seen = fake_client ~error:transport () in
+  (match J.get client ~key with
+   | Error (E.Terminal "wire closed") -> ()
+   | Ok _ -> Alcotest.fail "JSON.GET should pass through transport error"
+   | Error e -> Alcotest.failf "unexpected transport error %a" E.pp e);
+
+  let client, _seen = fake_client ~reply:(R.Bulk_string "not-int") () in
+  expect_protocol_violation "JSON.DEL bad reply" (J.del client ~key);
+
+  let client, _seen = fake_client ~reply:(R.Integer 2L) () in
+  expect_protocol_violation "JSON.NUMINCRBY bad reply"
+    (J.num_incr_by client ~key ~path:"$.age" 1.0);
+
+  let client, _seen = fake_client ~reply:(R.Array [ R.Integer 2L ]) () in
+  expect_protocol_violation "JSON.TOGGLE bad bool"
+    (J.toggle client ~key ~path:"$.active")
 
 let test_array_commands () =
   let key = "json:1" in
@@ -212,6 +262,60 @@ let test_array_commands () =
         (J.arr_index client ~key ~path:"$.tags" ~json:"\"math\""
            ~stop:2))
 
+let test_array_argument_variants () =
+  let key = "json:1" in
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Bulk_string "\"tail\"" ]) ()
+  in
+  (match J.arr_pop client ~key with
+   | Ok [ Some "\"tail\"" ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRPOP default result"
+   | Error e -> Alcotest.failf "JSON.ARRPOP default: %a" E.pp e);
+  check_seen "JSON.ARRPOP default" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRPOP"; key ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Bulk_string "\"tail\"" ]) ()
+  in
+  (match J.arr_pop client ~key ~path:"$.tags" with
+   | Ok [ Some "\"tail\"" ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRPOP path result"
+   | Error e -> Alcotest.failf "JSON.ARRPOP path: %a" E.pp e);
+  check_seen "JSON.ARRPOP path" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRPOP"; key; "$.tags" ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Bulk_string "\"head\"" ]) ()
+  in
+  (match J.arr_pop client ~key ~index:0 with
+   | Ok [ Some "\"head\"" ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRPOP index result"
+   | Error e -> Alcotest.failf "JSON.ARRPOP index: %a" E.pp e);
+  check_seen "JSON.ARRPOP index" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRPOP"; key; "$"; "0" ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Integer 1L ]) ()
+  in
+  (match J.arr_index client ~key ~path:"$.tags" ~json:"\"logic\"" with
+   | Ok [ Some 1 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRINDEX no range result"
+   | Error e -> Alcotest.failf "JSON.ARRINDEX no range: %a" E.pp e);
+  check_seen "JSON.ARRINDEX no range" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRINDEX"; key; "$.tags"; "\"logic\"" ] seen;
+
+  let client, seen =
+    fake_client ~reply:(R.Array [ R.Integer 1L ]) ()
+  in
+  (match
+     J.arr_index client ~key ~path:"$.tags" ~json:"\"logic\"" ~start:1
+   with
+   | Ok [ Some 1 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRINDEX start result"
+   | Error e -> Alcotest.failf "JSON.ARRINDEX start: %a" E.pp e);
+  check_seen "JSON.ARRINDEX start" ~key ~read_from:RF.Primary
+    ~args:[ "JSON.ARRINDEX"; key; "$.tags"; "\"logic\""; "1" ] seen
+
 let test_string_object_and_resp_commands () =
   let key = "json:1" in
   let client, seen =
@@ -254,6 +358,25 @@ let test_string_object_and_resp_commands () =
   check_seen "JSON.RESP" ~key ~read_from:RF.Primary
     ~args:[ "JSON.RESP"; key; "$" ] seen
 
+let test_read_overrides_and_scalar_decodes () =
+  let key = "json:1" in
+  let read_from = RF.Az_affinity { az = "us-east-1a" } in
+  let client, seen = fake_client ~reply:(R.Integer 7L) () in
+  (match J.arr_len client ~read_from ~key with
+   | Ok [ Some 7 ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.ARRLEN scalar result"
+   | Error e -> Alcotest.failf "JSON.ARRLEN scalar: %a" E.pp e);
+  check_seen "JSON.ARRLEN override" ~key ~read_from
+    ~args:[ "JSON.ARRLEN"; key ] seen;
+
+  let client, seen = fake_client ~reply:(R.Simple_string "string") () in
+  (match J.type_of client ~read_from ~key with
+   | Ok [ Some "string" ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected JSON.TYPE scalar result"
+   | Error e -> Alcotest.failf "JSON.TYPE scalar: %a" E.pp e);
+  check_seen "JSON.TYPE override" ~key ~read_from
+    ~args:[ "JSON.TYPE"; key ] seen
+
 let test_decode_get_and_mget () =
   (match J.For_testing.decode_get (R.Bulk_string "[{\"name\":\"ada\"}]") with
    | Ok (Some s) ->
@@ -268,6 +391,25 @@ let test_decode_get_and_mget () =
    | Ok [ Some "[\"ada\"]"; None; Some "[\"grace\"]" ] -> ()
    | Ok _ -> Alcotest.fail "unexpected mget decode"
    | Error e -> Alcotest.failf "decode mget: %a" E.pp e)
+
+let test_decode_string_shapes () =
+  (match J.For_testing.decode_get R.Null with
+   | Ok None -> ()
+   | Ok (Some _) -> Alcotest.fail "expected null JSON.GET"
+   | Error e -> Alcotest.failf "decode null get: %a" E.pp e);
+  (match J.For_testing.decode_get (R.Simple_string "{}") with
+   | Ok (Some "{}") -> ()
+   | Ok _ -> Alcotest.fail "unexpected simple string decode"
+   | Error e -> Alcotest.failf "decode simple get: %a" E.pp e);
+  (match
+     J.For_testing.decode_get
+       (R.Verbatim_string { encoding = "txt"; data = "{\"v\":1}" })
+   with
+   | Ok (Some "{\"v\":1}") -> ()
+   | Ok _ -> Alcotest.fail "unexpected verbatim decode"
+   | Error e -> Alcotest.failf "decode verbatim get: %a" E.pp e);
+  expect_protocol_violation "JSON.GET bad string"
+    (J.For_testing.decode_get (R.Integer 1L))
 
 let test_decode_type_and_lengths () =
   (match
@@ -294,6 +436,11 @@ let test_decode_bool_results () =
   | Ok _ -> Alcotest.fail "unexpected bool decode"
   | Error e -> Alcotest.failf "decode bool: %a" E.pp e
 
+let test_decode_bool_protocol_violation () =
+  expect_protocol_violation "JSON.TOGGLE bad integer"
+    (J.For_testing.decode_bool_results "JSON.TOGGLE"
+       (R.Array [ R.Integer 2L ]))
+
 let test_decode_obj_keys () =
   let reply =
     R.Array
@@ -305,6 +452,31 @@ let test_decode_obj_keys () =
   | Ok [ Some [ "name"; "age" ]; Some [] ] -> ()
   | Ok _ -> Alcotest.fail "unexpected obj keys decode"
   | Error e -> Alcotest.failf "decode obj keys: %a" E.pp e
+
+let test_decode_obj_key_shapes () =
+  (match
+     J.For_testing.decode_obj_keys
+       (R.Array [ R.Bulk_string "name"; R.Simple_string "age" ])
+   with
+   | Ok [ Some [ "name"; "age" ] ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected restricted obj keys"
+   | Error e -> Alcotest.failf "decode restricted obj keys: %a" E.pp e);
+  (match J.For_testing.decode_obj_keys R.Null with
+   | Ok [ None ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected null obj keys"
+   | Error e -> Alcotest.failf "decode null obj keys: %a" E.pp e);
+  (match
+     J.For_testing.decode_obj_keys
+       (R.Array [ R.Null; R.Array [ R.Bulk_string "nested" ] ])
+   with
+   | Ok [ None; Some [ "nested" ] ] -> ()
+   | Ok _ -> Alcotest.fail "unexpected enhanced obj keys"
+   | Error e -> Alcotest.failf "decode enhanced obj keys: %a" E.pp e);
+  expect_protocol_violation "JSON.OBJKEYS bad key"
+    (J.For_testing.decode_obj_keys
+       (R.Array [ R.Array [ R.Integer 1L ] ]));
+  expect_protocol_violation "JSON.OBJKEYS bad top-level"
+    (J.For_testing.decode_obj_keys (R.Integer 1L))
 
 let test_decode_protocol_violation () =
   match J.For_testing.decode_mget (R.Integer 1L) with
@@ -400,20 +572,34 @@ let tests =
       test_get_args_with_format;
     Alcotest.test_case "JSON.MGET args" `Quick test_mget_args;
     Alcotest.test_case "JSON.ARRAPPEND args" `Quick test_arr_append_args;
+    Alcotest.test_case "JSON.SET conditions and replies" `Quick
+      test_set_conditions_and_reply_shapes;
     Alcotest.test_case "JSON.MSET args and empty input" `Quick
       test_mset_args_and_empty_input;
     Alcotest.test_case "JSON key/path and number commands" `Quick
       test_key_path_and_number_commands;
+    Alcotest.test_case "JSON protocol violations and errors" `Quick
+      test_protocol_violations_and_errors;
     Alcotest.test_case "JSON array commands" `Quick test_array_commands;
+    Alcotest.test_case "JSON array argument variants" `Quick
+      test_array_argument_variants;
     Alcotest.test_case "JSON string/object/RESP commands" `Quick
       test_string_object_and_resp_commands;
+    Alcotest.test_case "JSON read overrides and scalar decodes" `Quick
+      test_read_overrides_and_scalar_decodes;
     Alcotest.test_case "decode JSON.GET and JSON.MGET" `Quick
       test_decode_get_and_mget;
+    Alcotest.test_case "decode JSON string shapes" `Quick
+      test_decode_string_shapes;
     Alcotest.test_case "decode JSON.TYPE and length results" `Quick
       test_decode_type_and_lengths;
     Alcotest.test_case "decode JSON.TOGGLE results" `Quick
       test_decode_bool_results;
+    Alcotest.test_case "decode JSON.TOGGLE rejects bad bool" `Quick
+      test_decode_bool_protocol_violation;
     Alcotest.test_case "decode JSON.OBJKEYS" `Quick test_decode_obj_keys;
+    Alcotest.test_case "decode JSON.OBJKEYS shapes" `Quick
+      test_decode_obj_key_shapes;
     Alcotest.test_case "decode rejects bad MGET shape" `Quick
       test_decode_protocol_violation;
     Alcotest.test_case "decode rejects integer overflow" `Quick
