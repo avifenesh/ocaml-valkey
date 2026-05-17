@@ -19,6 +19,9 @@ module Target : sig
       and [exec_multi]. *)
   type t =
     | Random
+    (** Pick one eligible live node. Cluster routers honor the accompanying
+        [Read_from.t]: [Primary] chooses primaries, replica policies choose
+        replicas when available. *)
     | By_slot of int
     | By_node of string
     | By_channel of string

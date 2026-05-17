@@ -6,7 +6,9 @@ Creates a hash index, inserts a few documents, runs a typed
 ## Run
 
 Search is provided by the Valkey Bundle image, not the plain
-`valkey/valkey` image:
+`valkey/valkey` image. The compose file pins a bundle with Valkey
+Search 1.2.0 because text indexes and aggregations require that module
+version.
 
 ```bash
 docker compose -f docker-compose.search.yml up -d

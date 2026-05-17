@@ -46,6 +46,8 @@ let get_field name doc =
   | Some other -> Alcotest.failf "field %s: unexpected %a" name R.pp other
   | None -> None
 
+let has_field name doc = List.mem_assoc name doc.S.fields
+
 let contains ~needle haystack =
   let n = String.length needle in
   let h = String.length haystack in
@@ -63,6 +65,34 @@ let drop_ignoring_missing c index =
     when contains ~needle:"not found" (Valkey.Error.to_string e) -> ()
   | Error e -> Alcotest.failf "cleanup FT.DROPINDEX: %a" err_pp e
 
+let expect_ok ctx = function
+  | Ok (R.Simple_string "OK") | Ok (R.Bulk_string "OK") -> ()
+  | Ok other -> Alcotest.failf "%s: unexpected %a" ctx R.pp other
+  | Error e -> Alcotest.failf "%s: %a" ctx err_pp e
+
+let json_set c key payload =
+  expect_ok ("JSON.SET " ^ key)
+    (C.custom c [| "JSON.SET"; key; "$"; payload |])
+
+let float32_blob values =
+  let bytes = Bytes.create (List.length values * 4) in
+  let set_byte offset bits shift =
+    let byte =
+      Int32.(to_int (logand (shift_right_logical bits shift) 0xffl))
+    in
+    Bytes.set bytes offset (Char.chr byte)
+  in
+  List.iteri
+    (fun i value ->
+      let bits = Int32.bits_of_float value in
+      let offset = i * 4 in
+      set_byte offset bits 0;
+      set_byte (offset + 1) bits 8;
+      set_byte (offset + 2) bits 16;
+      set_byte (offset + 3) bits 24)
+    values;
+  Bytes.unsafe_to_string bytes
+
 let test_hash_search_round_trip () =
   with_client @@ fun c ->
   let index = "idx:ocaml:search" in
@@ -74,7 +104,6 @@ let test_hash_search_round_trip () =
   let options =
     { S.default_create_options with
       prefixes = [ prefix ];
-      skip_initial_scan = true;
     }
   in
   let schema =
@@ -162,6 +191,77 @@ let test_hash_search_round_trip () =
    | Error e -> Alcotest.failf "FT.DROPINDEX: %a" err_pp e);
   ignore (C.del c [ doc1; doc2 ])
 
+let test_json_vector_search_round_trip () =
+  with_client @@ fun c ->
+  let index = "idx:ocaml:search:json" in
+  let prefix = "ocaml:search:json:" in
+  let doc1 = prefix ^ "1" in
+  let doc2 = prefix ^ "2" in
+  drop_ignoring_missing c index;
+  ignore (C.del c [ doc1; doc2 ]);
+  let options =
+    { S.default_create_options with
+      data_type = S.Json;
+      prefixes = [ prefix ];
+    }
+  in
+  let schema =
+    [ S.text ~alias:"title" "$.title";
+      S.vector_flat ~alias:"embedding" "$.embedding"
+        ~dim:2 ~distance_metric:S.L2;
+    ]
+  in
+  (match S.create c ~options ~index ~schema with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "JSON FT.CREATE: %a" err_pp e);
+  json_set c doc1
+    "{\"title\":\"calm harbor\",\"embedding\":[0.0,0.0]}";
+  json_set c doc2
+    "{\"title\":\"distant ridge\",\"embedding\":[3.0,4.0]}";
+  let title_options =
+    { S.default_search_options with
+      return_fields = Some [ S.return_field "title" ];
+      limit = Some (0, 10);
+    }
+  in
+  (match S.search c ~options:title_options ~index ~query:"@title:calm" with
+   | Ok { documents = [ doc ]; _ } ->
+       Alcotest.(check string) "JSON doc key" doc1 doc.key;
+       (match get_field "title" doc with
+        | Some title ->
+            Alcotest.(check bool) "JSON title returned" true
+              (contains ~needle:"calm" title)
+        | None -> Alcotest.fail "missing JSON title field")
+   | Ok r ->
+       Alcotest.failf "unexpected JSON search docs=%d"
+         (List.length r.documents)
+   | Error e -> Alcotest.failf "JSON FT.SEARCH: %a" err_pp e);
+  let vector_options =
+    { S.default_search_options with
+      dialect = Some 2;
+      params = [ "q", float32_blob [ 0.0; 0.0 ] ];
+      return_fields =
+        Some [ S.return_field "title"; S.return_field "dist" ];
+      limit = Some (0, 1);
+    }
+  in
+  (match
+     S.search c ~options:vector_options ~index
+       ~query:"*=>[KNN 1 @embedding $q AS dist]"
+   with
+   | Ok { documents = [ doc ]; _ } ->
+       Alcotest.(check string) "nearest vector doc" doc1 doc.key;
+       Alcotest.(check bool) "distance field returned" true
+         (has_field "dist" doc)
+   | Ok r ->
+       Alcotest.failf "unexpected vector search docs=%d"
+         (List.length r.documents)
+   | Error e -> Alcotest.failf "vector FT.SEARCH: %a" err_pp e);
+  (match S.drop_index c index with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "JSON FT.DROPINDEX: %a" err_pp e);
+  ignore (C.del c [ doc1; doc2 ])
+
 let tests =
   let available = search_available () in
   let tc name f =
@@ -170,4 +270,6 @@ let tests =
   in
   [ tc "hash index create/search/info/list/aggregate/drop"
       test_hash_search_round_trip;
+    tc "JSON index and vector KNN round-trip"
+      test_json_vector_search_round_trip;
   ]

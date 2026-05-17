@@ -150,6 +150,236 @@ let test_close_idle_connection_does_not_hang () =
       Alcotest.fail
         "closing an idle connection left background fibers running"
 
+let test_plain_peer_close_is_tcp_refused () =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let listener =
+    Eio.Net.listen ~reuse_addr:true ~backlog:1 ~sw net
+      (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+  in
+  let port =
+    match Eio.Net.listening_addr listener with
+    | `Tcp (_, port) -> port
+    | `Unix _ -> Alcotest.fail "expected TCP listener"
+  in
+  Eio.Fiber.fork ~sw (fun () ->
+      let flow, _addr = Eio.Net.accept ~sw listener in
+      Eio.Flow.close flow);
+  let reconnect =
+    { C.Reconnect.default with handshake_timeout = 1.0 }
+  in
+  let config =
+    { C.Config.default with reconnect; keepalive_interval = None }
+  in
+  try
+    let conn =
+      C.connect ~sw ~net ~clock ~config ~host:"127.0.0.1" ~port ()
+    in
+    C.close conn;
+    Alcotest.fail "expected peer-close handshake to fail"
+  with
+  | C.Handshake_failed (C.Error.Tcp_refused _) -> ()
+  | C.Handshake_failed e ->
+      Alcotest.failf "expected Tcp_refused, got %a" C.Error.pp e
+
+let write_raw_resp flow s =
+  Eio.Flow.write flow [ Cstruct.of_string s ]
+
+let parsed_command_name = function
+  | R.Array (R.Bulk_string cmd :: _) -> String.uppercase_ascii cmd
+  | R.Array (R.Simple_string cmd :: _) -> String.uppercase_ascii cmd
+  | other ->
+      Alcotest.failf "expected command array, got %a" R.pp other
+
+let await_or_fail clock seconds promise message =
+  match
+    Eio.Time.with_timeout clock seconds
+      (fun () -> Ok (Eio.Promise.await promise))
+  with
+  | Ok v -> v
+  | Error `Timeout -> Alcotest.fail message
+
+let test_close_during_reconnect_handshake_no_publish () =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let listener =
+    Eio.Net.listen ~reuse_addr:true ~backlog:1 ~sw net
+      (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+  in
+  let port =
+    match Eio.Net.listening_addr listener with
+    | `Tcp (_, port) -> port
+    | `Unix _ -> Alcotest.fail "expected TCP listener"
+  in
+  let first_ready, resolve_first_ready = Eio.Promise.create () in
+  let second_accepted, resolve_second_accepted = Eio.Promise.create () in
+  let second_closed, resolve_second_closed = Eio.Promise.create () in
+  let release_second, resolve_release_second = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+      let flow1, _addr = Eio.Net.accept ~sw listener in
+      write_raw_resp flow1 "%0\r\n";
+      Eio.Promise.resolve resolve_first_ready ();
+      Eio.Time.sleep clock 0.05;
+      Eio.Flow.close flow1;
+      let flow2, _addr = Eio.Net.accept ~sw listener in
+      let reader =
+        Eio.Buf_read.of_flow ~max_size:(128 * 1024) flow2
+      in
+      let source = Valkey.Resp3_parser.of_buf_read reader in
+      ignore (Valkey.Resp3_parser.read source);
+      Eio.Promise.resolve resolve_second_accepted ();
+      Eio.Promise.await release_second;
+      (try write_raw_resp flow2 "%0\r\n" with _ -> ());
+      let closed =
+        match
+          Eio.Time.with_timeout clock 1.0 (fun () ->
+              Ok (Eio.Buf_read.any_char reader))
+        with
+        | Error `Timeout -> false
+        | Ok _ -> false
+        | exception End_of_file -> true
+        | exception Eio.Io _ -> true
+      in
+      Eio.Promise.resolve resolve_second_closed closed;
+      try Eio.Flow.close flow2 with _ -> ());
+  let hooks = Atomic.make 0 in
+  let reconnect =
+    { C.Reconnect.default with
+      initial_backoff = 0.0;
+      max_backoff = 0.0;
+      jitter = 0.0;
+      handshake_timeout = 5.0;
+    }
+  in
+  let config =
+    { C.Config.default with reconnect; keepalive_interval = None }
+  in
+  let conn =
+    C.connect ~sw ~net ~clock ~config ~host:"127.0.0.1" ~port
+      ~on_connected:(fun () -> Atomic.incr hooks)
+      ()
+  in
+  await_or_fail clock 1.0 first_ready
+    "fake server did not complete initial handshake";
+  Alcotest.(check int) "initial on_connected" 1 (Atomic.get hooks);
+  await_or_fail clock 2.0 second_accepted
+    "connection did not enter reconnect handshake";
+  (match
+     Eio.Time.with_timeout clock 1.0 (fun () -> Ok (C.close conn))
+   with
+   | Ok () -> ()
+   | Error `Timeout ->
+       Alcotest.fail "close blocked during reconnect handshake");
+  Eio.Promise.resolve resolve_release_second ();
+  Alcotest.(check bool) "reconnect attempt socket closed" true
+    (await_or_fail clock 2.0 second_closed
+       "server did not observe reconnect socket closure");
+  Alcotest.(check int) "no reconnect hook after close" 1
+    (Atomic.get hooks);
+  match C.state conn with
+  | C.Dead C.Error.Closed -> ()
+  | C.Dead e ->
+      Alcotest.failf "connection closed with unexpected state: %a"
+        C.Error.pp e
+  | _ -> Alcotest.fail "connection was not Dead Closed after close"
+
+let test_abandoned_queued_request_not_written () =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let listener =
+    Eio.Net.listen ~reuse_addr:true ~backlog:1 ~sw net
+      (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+  in
+  let port =
+    match Eio.Net.listening_addr listener with
+    | `Tcp (_, port) -> port
+    | `Unix _ -> Alcotest.fail "expected TCP listener"
+  in
+  let allow_server_read, resolve_allow_server_read =
+    Eio.Promise.create ()
+  in
+  let first_seen, resolve_first_seen = Eio.Promise.create () in
+  let next_seen, resolve_next_seen = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+      let flow, _addr = Eio.Net.accept ~sw listener in
+      let reader =
+        Eio.Buf_read.of_flow ~max_size:(128 * 1024 * 1024) flow
+      in
+      let source = Valkey.Resp3_parser.of_buf_read reader in
+      ignore (Valkey.Resp3_parser.read source);
+      write_raw_resp flow "%0\r\n";
+      Eio.Promise.await allow_server_read;
+      let first = parsed_command_name (Valkey.Resp3_parser.read source) in
+      Eio.Promise.resolve resolve_first_seen first;
+      write_raw_resp flow "+OK\r\n";
+      let next = parsed_command_name (Valkey.Resp3_parser.read source) in
+      Eio.Promise.resolve resolve_next_seen next;
+      if next = "PING" then write_raw_resp flow "+PONG\r\n"
+      else write_raw_resp flow "+OK\r\n");
+  let config =
+    { C.Config.default with
+      keepalive_interval = None;
+      max_queued_bytes = 16 * 1024 * 1024;
+    }
+  in
+  let conn =
+    C.connect ~sw ~net ~clock ~config ~host:"127.0.0.1" ~port ()
+  in
+  Fun.protect ~finally:(fun () -> C.close conn) @@ fun () ->
+  let payload = String.make (4 * 1024 * 1024) 'x' in
+  let first_done, resolve_first_done = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+      let r =
+        C.request ~timeout:5.0 conn
+          [| "SET"; "ocaml:test:blocked-write"; payload |]
+      in
+      Eio.Promise.resolve resolve_first_done r);
+  Eio.Time.sleep clock 0.02;
+  (match
+     C.request ~timeout:0.05 conn
+       [| "SET"; "ocaml:test:abandoned-before-write"; "1" |]
+   with
+   | Error C.Error.Timeout -> ()
+   | Ok v ->
+       Alcotest.failf "queued request unexpectedly completed: %a" R.pp v
+   | Error e ->
+       Alcotest.failf "expected Timeout for queued request, got %a"
+         C.Error.pp e);
+  Eio.Promise.resolve resolve_allow_server_read ();
+  Alcotest.(check string) "first command reached server" "SET"
+    (await_or_fail clock 2.0 first_seen
+       "server did not observe first command");
+  (match
+     await_or_fail clock 5.0 first_done
+       "large blocking request did not complete"
+   with
+   | Ok (R.Simple_string "OK") -> ()
+   | Ok v -> Alcotest.failf "first command returned %a" R.pp v
+   | Error e -> Alcotest.failf "first command failed: %a" C.Error.pp e);
+  let ping_done, resolve_ping_done = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+      Eio.Promise.resolve resolve_ping_done
+        (C.request ~timeout:2.0 conn [| "PING" |]));
+  let next =
+    await_or_fail clock 2.0 next_seen
+      "server did not observe command after abandoned request"
+  in
+  Alcotest.(check string)
+    "abandoned queued command was not written" "PING" next;
+  (match
+     await_or_fail clock 2.0 ping_done
+       "PING after abandoned queued request did not complete"
+   with
+   | Ok (R.Simple_string "PONG") -> ()
+   | Ok v -> Alcotest.failf "PING returned %a" R.pp v
+   | Error e -> Alcotest.failf "PING failed: %a" C.Error.pp e)
+
 let tls_port = 6390
 
 let rec find_repo_file rel dir =
@@ -581,6 +811,12 @@ let tests =
     Alcotest.test_case "availability_zone" `Quick test_availability_zone;
     Alcotest.test_case "close idle connection" `Quick
       test_close_idle_connection_does_not_hang;
+    Alcotest.test_case "plain peer-close handshake is Tcp_refused" `Quick
+      test_plain_peer_close_is_tcp_refused;
+    Alcotest.test_case "close during reconnect handshake" `Quick
+      test_close_during_reconnect_handshake_no_publish;
+    Alcotest.test_case "abandoned queued request is not written" `Quick
+      test_abandoned_queued_request_not_written;
     Alcotest.test_case "recovery" `Quick test_recovery_client_kill;
     Alcotest.test_case "timeout_late_reply" `Quick test_timeout_late_reply;
     Alcotest.test_case "stress" `Quick test_stress;

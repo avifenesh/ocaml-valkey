@@ -285,7 +285,12 @@ let exec ?timeout ?target ?read_from t args =
            (* Fan-out command routed through single-reply exec: send to
               a random node. This preserves pre-spec behavior; callers
               who want true fan-out should use [exec_multi]. *)
-           Router.exec ?timeout t.router Target.Random user_rf args)
+           let fallback_rf =
+             match Command_spec.lookup args with
+             | Fan_primaries -> Read_from.Primary
+             | _ -> user_rf
+           in
+           Router.exec ?timeout t.router Target.Random fallback_rf args)
 
 (* Pure mapping from a [Connection.request_pair] result for the
    OPTIN [CACHING YES + read] submit to the read's effective

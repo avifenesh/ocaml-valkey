@@ -395,6 +395,7 @@ let watch ?timeout ?hint_key client keys =
            let args = Array.of_list ("WATCH" :: keys) in
            (match request_ok ?timeout conn args with
             | Error e ->
+                close_connection conn;
                 g.released <- true;
                 Eio.Mutex.unlock mutex;
                 Error e

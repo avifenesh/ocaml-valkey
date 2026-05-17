@@ -9,10 +9,13 @@
 
 services:
   valkey-bundle:
-    image: valkey/valkey-bundle:unstable
+    # Valkey Search 1.2.0 is needed for TEXT, TAG, NUMERIC, and
+    # aggregation coverage. Stable bundle 9 images currently ship
+    # Search 1.0.0, which is vector-only.
+    image: valkey/valkey-bundle:9.1-rc2@sha256:bd0c73cef4eaeb7c965cfaed4400eec63564e6f326de5bf03a43115ef84851a4
     container_name: ocaml-valkey-bundle
     ports:
-      - "6381:6379"
+      - "127.0.0.1:6381:6379"
     command: >-
       valkey-server
       --appendonly no
@@ -23,4 +26,3 @@ services:
       interval: 2s
       timeout: 1s
       retries: 10
-    restart: unless-stopped

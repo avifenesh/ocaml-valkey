@@ -355,6 +355,34 @@ let test_random_target_spreads_across_connections () =
     Alcotest.fail
       "Target.Random never moved off one pooled connection"
 
+let test_cluster_close_bounded_during_refresh () =
+  Eio_main.run @@ fun env ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  match
+    Eio.Time.with_timeout clock 3.0 (fun () ->
+        Ok
+          (Eio.Switch.run @@ fun sw ->
+           let config =
+             { (CR.Config.default ~seeds) with
+               prefer_hostname = true;
+               refresh_interval = 0.001;
+               refresh_jitter = 0.0;
+             }
+           in
+           match CR.create ~sw ~net ~clock ~config () with
+           | Error m -> Alcotest.failf "cluster router: %s" m
+           | Ok router ->
+               let client = C.from_router ~config:C.Config.default router in
+               ignore (C.custom client [| "CLUSTER"; "NODES" |]);
+               Eio.Time.sleep clock 0.02;
+               C.close client))
+  with
+  | Ok () -> ()
+  | Error `Timeout ->
+      Alcotest.fail
+        "Client.close did not stop the cluster refresh/reconnect fibers"
+
 (* Commands whose first-key position is dynamic on the wire (the
    server reports firstkey=0 as a sentinel because the real
    position depends on a numeric argument like [numkeys] or a
@@ -618,6 +646,8 @@ let tests =
       test_cluster_keyslot_matches_client;
     tc "Target.Random spreads across pooled connections"
       test_random_target_spreads_across_connections;
+    tc "Client.close stops refresh fibers promptly"
+      test_cluster_close_bounded_during_refresh;
     tc "CLUSTER INFO contains cluster_state"
       test_cluster_info_contains_state;
     tc "Command_spec key indices match server COMMAND INFO"

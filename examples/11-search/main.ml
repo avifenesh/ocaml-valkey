@@ -63,7 +63,6 @@ let () =
   let options =
     { S.default_create_options with
       prefixes = [ prefix ];
-      skip_initial_scan = true;
     }
   in
   let schema =

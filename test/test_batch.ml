@@ -483,6 +483,52 @@ let test_watch_guard_timeout_respected () =
    | Error e -> Alcotest.failf "GET after guard timeout: %a" err_pp e);
   ignore (C.del client [ key ])
 
+let test_watch_setup_timeout_releases_guard () =
+  with_cluster_client_and_admin
+    ~admin_host:"valkey-c1" ~admin_port:7000
+  @@ fun ~clock client admin ->
+  let key = "wg:setup-timeout:{wgsetup}" in
+  let _ = C.set client key "before-watch-setup-timeout" in
+  (match C.client_pause admin ~timeout_ms:200 with
+   | Ok () -> ()
+   | Error e -> Alcotest.failf "CLIENT PAUSE: %a" err_pp e);
+  Eio.Time.sleep clock 0.01;
+  let setup_outcome =
+    B.with_watch ~timeout:0.05 client [ key ] (fun _guard ->
+      Alcotest.fail "watch closure should not run after setup timeout")
+  in
+  (match setup_outcome with
+   | Error E.Timeout -> ()
+   | Error e ->
+       Alcotest.failf "expected WATCH setup Timeout, got %a" err_pp e
+   | Ok _ -> Alcotest.fail "WATCH setup unexpectedly succeeded");
+  Eio.Time.sleep clock 0.25;
+  let retry_outcome =
+    Eio.Time.with_timeout clock 2.0 (fun () ->
+        Ok
+          (B.with_watch ~timeout:1.0 client [ key ] (fun guard ->
+               let b = B.create ~atomic:true ~hint_key:key () in
+               let _ = B.queue b [| "SET"; key; "after-watch-setup-timeout" |] in
+               B.run_with_guard ~timeout:1.0 b guard)))
+  in
+  (match retry_outcome with
+   | Error `Timeout ->
+       Alcotest.fail "second with_watch timed out; guard mutex leaked?"
+   | Ok (Ok (Ok (Some _))) -> ()
+   | Ok (Ok (Ok None)) ->
+       Alcotest.fail "second with_watch aborted unexpectedly"
+   | Ok (Ok (Error e)) ->
+       Alcotest.failf "second run_with_guard failed: %a" err_pp e
+   | Ok (Error e) ->
+       Alcotest.failf "second WATCH setup failed: %a" err_pp e);
+  (match C.get client key with
+   | Ok (Some "after-watch-setup-timeout") -> ()
+   | Ok v ->
+       Alcotest.failf "expected after-watch-setup-timeout, got %s"
+         (match v with Some s -> s | None -> "<nil>")
+   | Error e -> Alcotest.failf "GET after setup timeout: %a" err_pp e);
+  ignore (C.del client [ key ])
+
 (* CROSSSLOT validation happens in [watch] before any wire I/O,
    keeping a misuse from acquiring a mutex that would never be
    released. *)
@@ -794,6 +840,8 @@ let tests =
       test_watch_guard_aborts_on_rival;
     tc "watch guard: timeout is respected"
       test_watch_guard_timeout_respected;
+    tc "watch setup timeout releases guard"
+      test_watch_setup_timeout_releases_guard;
     tc "with_watch releases guard on closure exception"
       test_watch_guard_released_on_exception;
     tc "watch rejects cross-slot key set"

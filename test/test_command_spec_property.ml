@@ -17,7 +17,10 @@
       [By_slot s] + [Prefer_replica] reaches a replica, while the
       same call with [Primary] reaches the primary. We probe via
       `CLUSTER MYID`, which returns the node ID of whichever node
-      served the request. *)
+      served the request.
+
+   4. Target.Random also respects [Read_from], which matters for
+      slotless module commands such as Valkey Search. *)
 
 module C = Valkey.Client
 module CR = Valkey.Cluster_router
@@ -129,6 +132,52 @@ let cluster_myid ~client ~slot ~read_from =
   | Error e ->
       Alcotest.failf "CLUSTER MYID: %a" err_pp e
 
+let random_cluster_myid ~client ~read_from =
+  match
+    C.custom ~target:R.Target.Random ~read_from client
+      [| "CLUSTER"; "MYID" |]
+  with
+  | Ok (Valkey.Resp3.Bulk_string id)
+  | Ok (Valkey.Resp3.Simple_string id) -> id
+  | Ok other ->
+      Alcotest.failf
+        "CLUSTER MYID via Random returned %a, expected bulk/simple string"
+        Valkey.Resp3.pp other
+  | Error e ->
+      Alcotest.failf "CLUSTER MYID via Random: %a" err_pp e
+
+let cluster_nodes_text client =
+  match C.custom ~target:R.Target.Random client [| "CLUSTER"; "NODES" |] with
+  | Ok (Valkey.Resp3.Bulk_string s)
+  | Ok (Valkey.Resp3.Simple_string s)
+  | Ok (Valkey.Resp3.Verbatim_string { data = s; _ }) -> s
+  | Ok other ->
+      Alcotest.failf "CLUSTER NODES returned %a" Valkey.Resp3.pp other
+  | Error e -> Alcotest.failf "CLUSTER NODES: %a" err_pp e
+
+let replica_ids_from_cluster_nodes text =
+  let has_role_flag wanted flags =
+    String.split_on_char ',' flags
+    |> List.exists wanted
+  in
+  let is_replica_flag flag = flag = "slave" || flag = "replica" in
+  String.split_on_char '\n' text
+  |> List.filter_map (fun line ->
+         match String.split_on_char ' ' line with
+         | id :: _addr :: flags :: _
+           when has_role_flag is_replica_flag flags -> Some id
+         | _ -> None)
+
+let primary_ids_from_cluster_nodes text =
+  let is_primary_flag flag = flag = "master" || flag = "primary" in
+  String.split_on_char '\n' text
+  |> List.filter_map (fun line ->
+         match String.split_on_char ' ' line with
+         | id :: _addr :: flags :: _
+           when String.split_on_char ',' flags
+                |> List.exists is_primary_flag -> Some id
+         | _ -> None)
+
 let test_read_from_respected () =
   with_cluster_router @@ fun ~router ~client ->
   (* Sample a handful of slots, one per primary shard. Cluster has
@@ -182,7 +231,48 @@ let test_read_from_respected () =
              primary %s across 6 calls; Read_from ignored?"
             slot primary_id;
         ignore router)
-      sample_slots
+        sample_slots
+
+let test_random_target_respects_read_from () =
+  with_cluster_router @@ fun ~router:_ ~client ->
+  let nodes_text = cluster_nodes_text client in
+  let primary_ids = primary_ids_from_cluster_nodes nodes_text in
+  let replica_ids = replica_ids_from_cluster_nodes nodes_text in
+  let primary_hits =
+    List.init 8 (fun _ ->
+        random_cluster_myid ~client ~read_from:R.Read_from.Primary)
+  in
+  let non_primary_hits =
+    List.filter (fun id -> not (List.mem id primary_ids)) primary_hits
+  in
+  if primary_ids = [] then Alcotest.fail "CLUSTER NODES has no primaries";
+  if non_primary_hits <> [] then
+    Alcotest.failf
+      "Target.Random + Primary reached replica/non-primary nodes. \
+       hits=[%s], non_primaries=[%s], primaries=[%s]"
+      (String.concat "," primary_hits)
+      (String.concat "," non_primary_hits)
+      (String.concat "," primary_ids);
+  match replica_ids with
+  | [] ->
+      print_endline
+        "[skip] cluster has no replicas; Target.Random read_from property vacuous"
+  | _ ->
+      let hits =
+        List.init 8 (fun _ ->
+            random_cluster_myid ~client
+              ~read_from:R.Read_from.Prefer_replica)
+      in
+      let primary_hits =
+        List.filter (fun id -> not (List.mem id replica_ids)) hits
+      in
+      if primary_hits <> [] then
+        Alcotest.failf
+          "Target.Random + Prefer_replica reached primary/non-replica \
+           nodes. hits=[%s], non_replicas=[%s], replicas=[%s]"
+          (String.concat "," hits)
+          (String.concat "," primary_hits)
+          (String.concat "," replica_ids)
 
 (* ---------- registration ---------- *)
 
@@ -203,4 +293,6 @@ let tests =
       test_slot_coverage_full;
     tc "Read_from.Prefer_replica routes to a replica"
       test_read_from_respected;
+    tc "Target.Random honors Read_from.Prefer_replica"
+      test_random_target_respects_read_from;
   ]

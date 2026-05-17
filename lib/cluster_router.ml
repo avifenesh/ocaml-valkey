@@ -110,6 +110,80 @@ let pick_node_by_read_from (rf : Router.Read_from.t) (shard : Topology.Shard.t) 
        | Some n -> n
        | None -> any_replica_or_primary ())
 
+let pick_random_connection_by_read_from ~pool ~topology rf =
+  let candidate_count pred =
+    List.fold_left
+      (fun acc (shard : Topology.Shard.t) ->
+        let add acc (node : Topology.Node.t) =
+          if node.health = Topology.Node.Online && pred node
+          then acc + 1
+          else acc
+        in
+        List.fold_left add (add acc shard.primary) shard.replicas)
+      0 (Topology.shards topology)
+  in
+  let pick_in_tier pred =
+    let total = candidate_count pred in
+    if total = 0 then None
+    else
+      let start = Random.int total in
+      let exception Found of Connection.t in
+      let scan lo hi =
+        let index = ref 0 in
+        try
+          List.iter
+            (fun (shard : Topology.Shard.t) ->
+              let visit (node : Topology.Node.t) =
+                if node.health = Topology.Node.Online && pred node then begin
+                  let i = !index in
+                  incr index;
+                  if i >= lo && i < hi then
+                    match Node_pool.pick pool ~node_id:node.id with
+                    | Some conn -> raise (Found conn)
+                    | None -> ()
+                end
+              in
+              visit shard.primary;
+              List.iter visit shard.replicas)
+            (Topology.shards topology);
+          None
+        with Found conn -> Some conn
+      in
+      match scan start total with
+      | Some _ as conn -> conn
+      | None -> scan 0 start
+  in
+  let rec pick_tier predicates =
+    match predicates with
+    | [] -> None
+    | pred :: rest ->
+        (match pick_in_tier pred with
+         | Some _ as conn -> conn
+         | None -> pick_tier rest)
+  in
+  let is_primary (node : Topology.Node.t) =
+    node.role = Topology.Node.Primary
+  in
+  let is_replica (node : Topology.Node.t) =
+    node.role = Topology.Node.Replica
+  in
+  match rf with
+  | Router.Read_from.Primary -> pick_in_tier is_primary
+  | Router.Read_from.Prefer_replica ->
+      pick_tier [ is_replica; is_primary ]
+  | Router.Read_from.Az_affinity { az } ->
+      pick_tier
+        [ (fun node -> is_replica node && node.availability_zone = Some az);
+          is_replica;
+          is_primary;
+        ]
+  | Router.Read_from.Az_affinity_replicas_and_primary { az } ->
+      pick_tier
+        [ (fun node -> node.availability_zone = Some az);
+          is_replica;
+          is_primary;
+        ]
+
 let close_conn_quietly c =
   try Connection.close c
   with Eio.Io _ | End_of_file | Invalid_argument _
@@ -487,12 +561,9 @@ let make_exec ~pool ~topology_ref ~clock ~max_redirects ~trigger_refresh
          | None -> err_terminal "unknown node %s" node_id
          | Some conn -> send_once ?timeout conn args)
     | Router.Target.Random ->
-        (match Node_pool.all_connections pool with
-         | [] -> err_terminal "cluster has no live connections"
-         | conns ->
-             (match pick_random conns with
-              | Some c -> send_once ?timeout c args
-              | None -> err_terminal "cluster has no live connections"))
+        (match pick_random_connection_by_read_from ~pool ~topology rf with
+         | Some conn -> send_once ?timeout conn args
+         | None -> err_terminal "cluster has no live connections")
     | Router.Target.By_channel _ ->
         err_terminal "cluster router: sharded pub/sub not yet implemented"
   in
