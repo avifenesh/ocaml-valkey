@@ -15,6 +15,7 @@ module Conn = Valkey.Connection
 let seeds = Test_support.seeds
 let force_skip = Test_support.force_skip
 let cluster_reachable = Test_support.cluster_reachable
+let wait_cluster_ready = Test_support.wait_cluster_ready
 
 let with_cluster_client f =
   Eio_main.run @@ fun env ->
@@ -615,7 +616,8 @@ let test_cluster_pubsub_failover_replay () =
               Alcotest.fail "handle closed unexpectedly"
         end
       in
-      try_once ()
+      try_once ();
+      wait_cluster_ready env
 
 let tests =
   let reachable = cluster_reachable () in
