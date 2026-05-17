@@ -2,8 +2,9 @@
 
 A modern Valkey client for OCaml 5 + [Eio](https://github.com/ocaml-multicore/eio).
 
-**Status: alpha.** v0.2.0 is on opam; v0.3.0 is tagged and
-awaiting opam publish. Full core + cluster + batch (incl. WATCH
+**Status: alpha.** v0.2.0 and v0.3.0 are on opam; v0.3.1 is
+tagged and awaiting opam publish (patch release: opam-sandbox
+`runtest` fix for mTLS test fixtures). Full core + cluster + batch (incl. WATCH
 guards + cross-slot `pfcount_cluster`) + client-side caching
 (Default / BCAST / OPTIN, standalone and cluster) + blocking
 pool (BLPOP / BRPOP / BLMOVE / XREAD BLOCK via a per-node lease
@@ -541,7 +542,8 @@ state:
   [ROADMAP.md](ROADMAP.md))
 - ✅ Phase 10 — IAM (SigV4 signer + 10-min refresh provider) +
   mTLS (`Tls_config.with_client_cert`)
-- ⏳ Phase 11 — module support (valkey-json / -search / -bloom)
+- ⏳ Phase 11 — module support (`Valkey.Search` landed; JSON /
+  Bloom pending)
 - ⏳ Phase 12 — deep audit → 1.0.0 stable
 
 ## License

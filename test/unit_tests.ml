@@ -17,6 +17,7 @@ let () =
       "cache", Test_cache.tests;
       "invalidation parser", Test_invalidation.tests;
       "inflight", Test_inflight.tests;
+      "search (pure)", Test_search.tests;
       "csc optin (pure)", Test_csc_optin_unit.tests;
       "observability (pure)", Test_observability.tests;
       "iam sigv4 (pure)", Test_iam_sigv4.tests;

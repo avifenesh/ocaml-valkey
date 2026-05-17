@@ -1,0 +1,28 @@
+# Valkey Bundle target for module integration tests.
+# The plain valkey/valkey image does not include Search; this fixture
+# uses valkey-bundle so FT.* commands are available on localhost:6381.
+#
+# Usage:
+#   docker compose -f docker-compose.search.yml up -d
+#   VALKEY_SEARCH_PORT=6381 dune exec test/run_tests.exe -- test 'search'
+#   docker compose -f docker-compose.search.yml down -v
+
+services:
+  valkey-bundle:
+    # Valkey Search 1.2.0 is needed for TEXT, TAG, NUMERIC, and
+    # aggregation coverage. Stable bundle 9 images currently ship
+    # Search 1.0.0, which is vector-only.
+    image: valkey/valkey-bundle:9.1-rc2@sha256:bd0c73cef4eaeb7c965cfaed4400eec63564e6f326de5bf03a43115ef84851a4
+    container_name: ocaml-valkey-bundle
+    ports:
+      - "127.0.0.1:6381:6379"
+    command: >-
+      valkey-server
+      --appendonly no
+      --save ""
+      --protected-mode no
+    healthcheck:
+      test: [ "CMD", "valkey-cli", "-p", "6379", "PING" ]
+      interval: 2s
+      timeout: 1s
+      retries: 10

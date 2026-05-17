@@ -274,7 +274,7 @@ type socket = {
 type entry = {
   resolver : (Resp3.t, Error.t) result Eio.Promise.u;
   size : int;
-  mutable abandoned : bool;
+  abandoned : bool Atomic.t;
 }
 
 type queued = {
@@ -382,7 +382,12 @@ let extract_string_field key = function
   | _ -> None
 
 
-let run_hello (sock : socket) (hs : Handshake.t) : (Resp3.t, Error.t) result =
+let handshake_io_error ~using_tls reason =
+  if using_tls then Error.Tls_failed reason
+  else Error.Tcp_refused reason
+
+let run_hello ~using_tls (sock : socket) (hs : Handshake.t) :
+    (Resp3.t, Error.t) result =
   try
     sock.write [ Resp3_writer.command_to_cstruct (hello_args hs) ];
     match Resp3_parser.read (Resp3_parser.of_buf_read sock.reader) with
@@ -405,9 +410,9 @@ let run_hello (sock : socket) (hs : Handshake.t) : (Resp3.t, Error.t) result =
       (* Peer closed the TLS/TCP connection without sending HELLO
          reply — most commonly an mTLS setup where the server
          tore down immediately. *)
-      Error (Error.Tls_failed "peer_closed_during_handshake")
+      Error (handshake_io_error ~using_tls "peer_closed_during_handshake")
   | Eio.Io _ as exn ->
-      Error (Error.Tls_failed (describe_exn exn))
+      Error (handshake_io_error ~using_tls (describe_exn exn))
 
 let run_select (sock : socket) db : (unit, Error.t) result =
   sock.write
@@ -465,10 +470,10 @@ type handshake_result = {
   hs_availability_zone : string option;
 }
 
-let full_handshake (sock : socket) (hs : Handshake.t)
+let full_handshake ~using_tls (sock : socket) (hs : Handshake.t)
     ~(client_cache : Client_cache.t option) :
     (handshake_result, Error.t) result =
-  match run_hello sock hs with
+  match run_hello ~using_tls sock hs with
   | Error e -> Error e
   | Ok hello_map ->
       let az = extract_string_field "availability_zone" hello_map in
@@ -611,15 +616,20 @@ let connect_and_handshake t :
     (fun _span ->
       match t.connect_once () with
       | Error e -> Error e
-      | Ok sock ->
-          (match
+    | Ok sock ->
+        (match
+           try
              full_handshake sock t.config.handshake
+               ~using_tls:(t.config.tls <> None)
                ~client_cache:t.config.client_cache
-           with
-           | Ok result -> Ok (sock, result)
-           | Error e ->
-               sock.close ();
-               Error e))
+           with exn ->
+             sock.close ();
+             raise exn
+         with
+         | Ok result -> Ok (sock, result)
+         | Error e ->
+             sock.close ();
+             Error e))
 
 let set_state t new_state =
   t.state <- new_state;
@@ -627,7 +637,7 @@ let set_state t new_state =
 
 let resolve_entry t (e : entry) (result : (Resp3.t, Error.t) result) =
   Byte_sem.release t.budget e.size;
-  if not e.abandoned then Eio.Promise.resolve e.resolver result
+  if not (Atomic.get e.abandoned) then Eio.Promise.resolve e.resolver result
 
 let drain_sent t (result : (Resp3.t, Error.t) result) =
   Eio.Mutex.use_rw ~protect:true t.sent_mutex (fun () ->
@@ -646,6 +656,14 @@ let drain_cmd_queue t (result : (Resp3.t, Error.t) result) =
   Queue.iter
     (fun q -> List.iter (fun e -> resolve_entry t e result) q.entries)
     leftovers
+
+let queued_has_live_waiter q =
+  match q.entries with
+  | [] -> true
+  | entries -> List.exists (fun e -> not (Atomic.get e.abandoned)) entries
+
+let discard_queued t result q =
+  List.iter (fun e -> resolve_entry t e result) q.entries
 
 let jittered_backoff (policy : Reconnect.t) attempts =
   let base =
@@ -667,21 +685,25 @@ let out_pump (t : t) (sock : socket) : unit =
             (try Chan.take t.cmd_queue
              with Chan.Closed -> raise Exit)
       in
-      let write_result =
-        try Ok (sock.write q.wires)
-        with exn -> Error exn
-      in
-      match write_result with
-      | Error _ ->
-          t.unsent <- Some q
-          (* leave loop; raise disconnect by returning *)
-      | Ok () ->
-          (match q.entries with
-           | [] -> ()
-           | es ->
-               Eio.Mutex.use_rw ~protect:true t.sent_mutex (fun () ->
-                   List.iter (fun e -> Queue.push e t.sent) es));
-          loop ()
+      if not (queued_has_live_waiter q) then begin
+        discard_queued t (Error Error.Interrupted) q;
+        loop ()
+      end else
+        let write_result =
+          try Ok (sock.write q.wires)
+          with exn -> Error exn
+        in
+        match write_result with
+        | Error _ ->
+            t.unsent <- Some q
+            (* leave loop; raise disconnect by returning *)
+        | Ok () ->
+            (match q.entries with
+             | [] -> ()
+             | es ->
+                 Eio.Mutex.use_rw ~protect:true t.sent_mutex (fun () ->
+                     List.iter (fun e -> Queue.push e t.sent) es));
+            loop ()
     end
   in
   try loop () with Exit -> ()
@@ -778,6 +800,15 @@ let run_connection (t : t) (sock : socket) : [ `Closed | `Disconnected ] =
    with _ -> ());
   if Atomic.get t.closing then `Closed else `Disconnected
 
+let sleep_until_retry_or_cancel t delay =
+  Eio.Fiber.first
+    (fun () ->
+      t.sleep delay;
+      `Retry)
+    (fun () ->
+      Eio.Promise.await t.cancel_signal;
+      `Cancelled)
+
 let recovery_loop (t : t) : unit =
   let policy = t.config.reconnect in
   let start = t.now () in
@@ -801,54 +832,84 @@ let recovery_loop (t : t) : unit =
           drain_cmd_queue t (Error Error.Interrupted))
     else
       match
-        t.with_timeout policy.handshake_timeout (fun () ->
-            connect_and_handshake t)
+        Eio.Fiber.first
+          (fun () ->
+            `Result
+              (t.with_timeout policy.handshake_timeout (fun () ->
+                   connect_and_handshake t)))
+          (fun () ->
+            Eio.Promise.await t.cancel_signal;
+            `Cancelled)
       with
-      | Error `Timeout ->
-          t.sleep (jittered_backoff policy n);
-          attempt (n + 1)
-      | Ok (Error e) when Error.is_terminal e ->
+      | `Cancelled -> ()
+      | `Result (Error `Timeout) ->
+          (match sleep_until_retry_or_cancel t (jittered_backoff policy n) with
+           | `Cancelled -> ()
+           | `Retry -> attempt (n + 1))
+      | `Result (Ok (Error e)) when Error.is_terminal e ->
           Eio.Mutex.use_rw ~protect:true t.state_mutex (fun () ->
               set_state t (Dead e);
               drain_sent t (Error e);
               drain_unsent t (Error e);
               drain_cmd_queue t (Error e))
-      | Ok (Error _) ->
-          t.sleep (jittered_backoff policy n);
-          attempt (n + 1)
-      | Ok (Ok (sock, hs_result)) ->
-          (* The server forgot our CLIENT TRACKING context while we
-             were disconnected. Any cached entry we own for a key
-             that routed through this connection is now un-tracked
-             on the server side — an external write won't produce
-             an invalidation for us. Conservative fix: clear the
-             whole CSC cache on every successful reconnect. Coarse
-             (a shard blip in a large cluster costs us every hit
-             until the cache warms back up) but correct, and
-             matches redis-py. B1's full_handshake has already
-             re-issued CLIENT TRACKING on [sock] so future reads
-             start tracked. *)
-          (match t.config.client_cache with
-           | None -> ()
-           | Some ccfg -> Cache.clear ccfg.Client_cache.cache);
-          (* Publish the new CLIENT ID + generation BEFORE flipping
-             the state to Alive. Readers that observe [Alive] must
-             already see the fresh (id, gen); otherwise a
-             Blocking_pool caller could snapshot a stale id and
-             issue CLIENT UNBLOCK against an id that now belongs to
-             a different client on the same server. *)
-          Eio.Mutex.use_rw ~protect:true t.state_mutex (fun () ->
-              drain_sent t (Error Error.Interrupted);
-              t.current <- Some sock;
-              t.server_info <- Some hs_result.hs_hello_map;
-              t.availability_zone <- hs_result.hs_availability_zone;
-              set_state t Alive);
-          (* Fire the reconnect hook outside the state mutex — the
-             hook typically calls [send_fire_and_forget], which takes
-             its own locks and must not deadlock here. *)
-          (try t.on_connected () with _ -> ())
-  in
-  attempt 0
+      | `Result (Ok (Error _)) ->
+          (match sleep_until_retry_or_cancel t (jittered_backoff policy n) with
+           | `Cancelled -> ()
+           | `Retry -> attempt (n + 1))
+      | `Result (Ok (Ok (sock, hs_result))) ->
+          if Atomic.get t.closing then
+            try sock.close ()
+            with Eio.Io _ | End_of_file | Invalid_argument _
+               | Unix.Unix_error _ -> ()
+          else begin
+            (* The server forgot our CLIENT TRACKING context while we
+               were disconnected. Any cached entry we own for a key
+               that routed through this connection is now un-tracked
+               on the server side — an external write won't produce
+               an invalidation for us. Conservative fix: clear the
+               whole CSC cache on every successful reconnect. Coarse
+               (a shard blip in a large cluster costs us every hit
+               until the cache warms back up) but correct, and
+               matches redis-py. B1's full_handshake has already
+               re-issued CLIENT TRACKING on [sock] so future reads
+               start tracked. Keep the potentially large table clear
+               outside [state_mutex]; only the state publication below
+               needs the lock. *)
+            (match t.config.client_cache with
+             | None -> ()
+             | Some ccfg -> Cache.clear ccfg.Client_cache.cache);
+            let published =
+              Eio.Mutex.use_rw ~protect:true t.state_mutex (fun () ->
+                  if Atomic.get t.closing then false
+                  else begin
+                    (* Publish the new CLIENT ID + generation BEFORE
+                       flipping the state to Alive. Readers that observe
+                       [Alive] must already see the fresh (id, gen);
+                       otherwise a Blocking_pool caller could snapshot a
+                       stale id and issue CLIENT UNBLOCK against an id that
+                       now belongs to a different client on the same
+                       server. *)
+                    drain_sent t (Error Error.Interrupted);
+                    t.current <- Some sock;
+                    t.server_info <- Some hs_result.hs_hello_map;
+                    t.availability_zone <- hs_result.hs_availability_zone;
+                    set_state t Alive;
+                    true
+                  end)
+            in
+            if published then begin
+              (* Fire the reconnect hook outside the state mutex — the hook
+                 typically calls [send_fire_and_forget], which takes its own
+                 locks and must not deadlock here. *)
+              if not (Atomic.get t.closing) then
+                try t.on_connected () with _ -> ()
+            end else
+              try sock.close ()
+              with Eio.Io _ | End_of_file | Invalid_argument _
+                 | Unix.Unix_error _ -> ()
+          end
+    in
+    attempt 0
 
 let try_enqueue t q : [ `Dead of Error.t | `In_queue ] =
   match
@@ -886,7 +947,7 @@ let request ?timeout t args =
         let run () =
           Byte_sem.acquire t.budget size;
           let promise, resolver = Eio.Promise.create () in
-          let entry = { resolver; size; abandoned = false } in
+          let entry = { resolver; size; abandoned = Atomic.make false } in
           match try_enqueue t { entries = [ entry ]; wires = [ wire ] } with
           | `Dead e ->
               Byte_sem.release t.budget size;
@@ -894,7 +955,7 @@ let request ?timeout t args =
           | `In_queue ->
               (try Eio.Promise.await promise
                with exn ->
-                 entry.abandoned <- true;
+                 Atomic.set entry.abandoned true;
                  raise exn)
         in
         let result =
@@ -987,7 +1048,7 @@ let request_n_internal ?timeout t (arg_arrays : string array list)
           let entries =
             List.map2
               (fun (_, resolver) size ->
-                { resolver; size; abandoned = false })
+                { resolver; size; abandoned = Atomic.make false })
               promise_resolver_pairs sizes
           in
           match try_enqueue t { entries; wires } with
@@ -1007,7 +1068,8 @@ let request_n_internal ?timeout t (arg_arrays : string array list)
                     (match
                        try Ok (Eio.Promise.await p)
                        with exn ->
-                         List.iter (fun e' -> e'.abandoned <- true)
+                         List.iter
+                           (fun e' -> Atomic.set e'.abandoned true)
                            (e :: e_rest);
                          raise exn
                      with
@@ -1266,9 +1328,10 @@ let close t =
         drain_cmd_queue t (Error Closed);
         c)
   in
-  match sock_to_close with
-  | Some sock -> (try sock.close ()
-           with Eio.Io _ | End_of_file | Invalid_argument _
-              | Unix.Unix_error _ -> ())
-  | None -> ()
+  (match sock_to_close with
+   | Some sock ->
+       (try sock.close ()
+        with Eio.Io _ | End_of_file | Invalid_argument _
+           | Unix.Unix_error _ -> ())
+   | None -> ())
   end

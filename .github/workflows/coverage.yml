@@ -70,17 +70,34 @@ jobs:
             sleep 2
           done
 
+      - name: Start Valkey bundle search
+        run: |
+          docker compose -f docker-compose.search.yml up -d
+          for i in $(seq 1 45); do
+            if docker compose -f docker-compose.search.yml exec -T valkey-bundle valkey-cli -p 6379 FT._LIST >/dev/null 2>&1; then
+              echo "search bundle up"; break
+            fi
+            if [ "$i" = "45" ]; then
+              docker logs ocaml-valkey-bundle || true
+              exit 1
+            fi
+            sleep 1
+          done
+
       - name: Build + test with coverage instrumentation
         run: |
           # Wipe any stale bisect files from previous runs.
           find . -name '*.coverage' -delete || true
           opam exec -- dune runtest --instrument-with bisect_ppx --force
+          EIO_BACKEND=posix VALKEY_SEARCH_PORT=6381 \
+            opam exec -- dune exec --instrument-with bisect_ppx --force \
+            test/run_tests.exe
 
       - name: Generate HTML coverage report
         run: |
           opam exec -- bisect-ppx-report html \
             --coverage-path . \
-            --source-path lib \
+            --source-path . \
             -o coverage-html
 
       - name: Compute coverage percentage
@@ -124,5 +141,6 @@ jobs:
       - name: Stop containers
         if: always()
         run: |
+          docker compose -f docker-compose.search.yml down -v || true
           docker compose -f docker-compose.cluster.yml down -v || true
           docker compose down -v || true

@@ -1,4 +1,7 @@
 module CS = Valkey.Command_spec
+module C = Valkey.Client
+module R = Valkey.Resp3
+module Router = Valkey.Router
 module T = Valkey.Router.Target
 module RF = Valkey.Router.Read_from
 
@@ -124,6 +127,40 @@ let test_watch_multi_key () =
   | Some (T.By_slot s, _) when s = slot_of "a" -> ()
   | _ -> Alcotest.fail "WATCH: multi-key, slot of first"
 
+let test_client_exec_fan_primary_fallback_forces_primary () =
+  let seen = ref None in
+  let exec ?timeout:_ target rf args =
+    seen := Some (target, rf, Array.to_list args);
+    Ok (R.Simple_string "OK")
+  in
+  let exec_multi ?timeout:_ _fan _args = [] in
+  let pair ?timeout:_ _target _args1 _args2 =
+    Error (Valkey.Connection.Error.Terminal "unused")
+  in
+  let router =
+    Router.make ~exec ~exec_multi ~pair ~close:(fun () -> ())
+      ~primary:(fun () -> None)
+      ~connection_for_slot:(fun _ -> None)
+      ~endpoint_for_slot:(fun _ -> None)
+      ~endpoint_for_node:(fun ~node_id:_ -> None)
+      ~all_connections:(fun () -> [])
+      ~is_standalone:false
+      ~atomic_lock_for_slot:(fun _ -> Eio.Mutex.create ())
+  in
+  let config = { C.Config.default with read_from = RF.Prefer_replica } in
+  let client = C.from_router ~config router in
+  (match C.exec client [| "SCRIPT"; "LOAD"; "return 1" |] with
+   | Ok (R.Simple_string "OK") -> ()
+   | Ok other -> Alcotest.failf "unexpected reply %a" R.pp other
+   | Error e ->
+       Alcotest.failf "unexpected error %a" Valkey.Connection.Error.pp e);
+  match !seen with
+  | Some (T.Random, RF.Primary, [ "SCRIPT"; "LOAD"; "return 1" ]) -> ()
+  | Some _ ->
+      Alcotest.fail
+        "Client.exec fan-primary fallback should force Primary"
+  | None -> Alcotest.fail "fake router was not called"
+
 let tests =
   [ Alcotest.test_case "GET: readonly, By_slot, rf preserved" `Quick
       test_get_readonly_by_slot;
@@ -163,4 +200,6 @@ let tests =
       test_client_list_fan_all_nodes;
     Alcotest.test_case "WATCH: multi-key first slot" `Quick
       test_watch_multi_key;
+    Alcotest.test_case "Client.exec Fan_primaries fallback forces Primary"
+      `Quick test_client_exec_fan_primary_fallback_forces_primary;
   ]

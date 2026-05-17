@@ -63,15 +63,19 @@ jobs:
         # Skip if this build *is* main — no baseline to compare to.
         if: github.event_name == 'pull_request'
         run: |
+          head_sha=$(git rev-parse HEAD)
+          cp head.json /tmp/bench-head.json
           git fetch origin main --depth=1
-          git stash push -u -m 'bench-head' || true
-          git checkout origin/main -- .
+          git reset --hard origin/main
+          git clean -ffd
           opam exec -- dune build
           opam exec -- dune exec bin/bench/bench.exe -- \
-            --ops 5000 --warmup 500 --json main.json
+            --ops 5000 --warmup 500 --json /tmp/bench-main.json
           # Restore PR head working tree.
-          git checkout HEAD -- .
-          git stash pop || true
+          git reset --hard "$head_sha"
+          git clean -ffd
+          cp /tmp/bench-head.json head.json
+          cp /tmp/bench-main.json main.json
 
       - name: Compare
         if: github.event_name == 'pull_request'

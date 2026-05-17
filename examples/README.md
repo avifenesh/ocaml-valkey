@@ -30,6 +30,8 @@ walk-through.
 | 07 | `07-task-queue/` | Producer/worker queue on Streams + consumer groups + claim-stuck | standalone |
 | 08 | `08-blocking-commands/` | `BLPOP` worker on a dedicated client, with timeout + cancel | standalone |
 | 09 | `09-leaderboard/` | Sorted-set leaderboard with `ZADD` / `ZINCRBY` / `ZRANGEBYSCORE` / pagination | standalone |
+| 10 | `10-batch/` | Cluster-aware bulk/scatter/atomic batch workflows | cluster |
+| 11 | `11-search/` | `FT.CREATE`, `FT.SEARCH`, `FT.AGGREGATE` through `Valkey.Search` | Valkey Bundle |
 
 ## Convention going forward
 

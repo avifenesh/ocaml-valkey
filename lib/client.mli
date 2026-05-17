@@ -234,7 +234,8 @@ val exec :
     the default route from the command name: single-key commands go
     [By_slot (slot_of key)]; writes force the [Read_from] to [Primary];
     fan-out commands (FLUSHALL, CLIENT LIST, …) fall back to a single
-    random node — use {!exec_multi} for true fan-out. *)
+    random node — primary-only for [Fan_primaries]; use {!exec_multi}
+    for true fan-out. *)
 
 val exec_multi :
   ?timeout:float ->

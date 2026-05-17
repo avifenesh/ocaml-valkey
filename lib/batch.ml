@@ -374,7 +374,7 @@ let resolve_watch_slot ~hint_key keys =
                        keys must share a slot"
                       k0 k s (Slot.of_key k) }))
 
-let watch ?hint_key client keys =
+let watch ?timeout ?hint_key client keys =
   match resolve_watch_slot ~hint_key keys with
   | Error e -> Error e
   | Ok slot ->
@@ -393,8 +393,9 @@ let watch ?hint_key client keys =
              atomic_lock = mutex; released = false;
            } in
            let args = Array.of_list ("WATCH" :: keys) in
-           (match request_ok conn args with
+           (match request_ok ?timeout conn args with
             | Error e ->
+                close_connection conn;
                 g.released <- true;
                 Eio.Mutex.unlock mutex;
                 Error e
@@ -508,8 +509,8 @@ let run_with_guard ?timeout t g =
             result
   end
 
-let with_watch ?hint_key client keys f =
-  match watch ?hint_key client keys with
+let with_watch ?timeout ?hint_key client keys f =
+  match watch ?timeout ?hint_key client keys with
   | Error e -> Error e
   | Ok g ->
       Fun.protect
