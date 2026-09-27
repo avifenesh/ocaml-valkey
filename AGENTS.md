@@ -73,3 +73,14 @@ Rationale: connection internals will change a lot (pipelining, reconnect state, 
 Handshake failures (TCP refused, `HELLO` rejected, AUTH wrong) raise exceptions during `connect`. Per-command failures (WRONGTYPE, MOVED, …) return `result`.
 
 Rationale: if the connection can't be established, there's nothing to `result`-handle. Users get a clean "connection failed" exception at the boundary and proceed normally after.
+
+## Worktree and tmp hygiene (owner, 2026-08-17)
+
+- When work in a git worktree is finished — merged, banked, or abandoned — clean it up
+  as part of finishing: `git worktree remove <path>` AND delete its branch
+  (`git branch -d`; `-D` only once the owner's merge/abandon decision is recorded).
+  A closed lane leaves no `wt-*` directory and no stale branch behind.
+- Every use of /tmp (or any scratch space) is cleaned by the task that created it:
+  delete scratch files and dirs when the task closes, not when disk pressure finds
+  them. Motivating incident 2026-08-17: 7 GB of dead lane dirs in /tmp plus an
+  unthrottled upload storm flooded 25 GB of swap and stalled the rig.
