@@ -94,7 +94,7 @@ connections — as long as you run under a switch.
 handshake synchronously. If the server is unreachable or rejects
 the handshake, it raises. This is deliberate — there is no result
 value to inspect before the connection exists (see
-[`CLAUDE.md`](../CLAUDE.md#connection-setup-errors-exceptions-not-result)
+[`AGENTS.md`](../AGENTS.md#connection-setup-errors-exceptions-not-result)
 in this repo for the rationale).
 
 Per-command failures (`WRONGTYPE`, `MOVED`, timeouts) return
