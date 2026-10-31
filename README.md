@@ -49,7 +49,7 @@ No Lwt compat layer. No legacy Redis support.
   - [docs/blocking-pool.md](docs/blocking-pool.md) — per-node lease
     pool for `BLPOP` / `BRPOP` / `XREAD BLOCK` etc.; config knobs,
     typed errors, topology-change behaviour.
-  - [docs/observability.md](docs/observability.md) — OpenTelemetry
+  - [docs/observability.md](docs/observability.md): OpenTelemetry
     spans, cache and blocking-pool metrics, redaction rules.
   - [docs/tls.md](docs/tls.md) — system CAs, dev certs,
     observed overhead.
@@ -267,7 +267,7 @@ and `Client.spublish` (slot-pinned).
 - **Parser fuzzer** (`bin/fuzz_parser/`) — byte-level + tree
   mutation + length-field poisoning + shrinker. 10 M strict
   clean at ~145 k inputs/s.
-- **Stability fuzzer** (`bin/fuzz/`) — live-server soak with 49
+- **Stability fuzzer** (`bin/fuzz/`): live-server soak with 49
   commands, optional docker-restart chaos, zero-error thresholds.
 - **Soak tool** (`bin/soak/`) — long-running stability with
   `Gc.quick_stat` + `/proc/self/fd` sampling + OLS slope
