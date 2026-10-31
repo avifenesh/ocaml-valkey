@@ -2,8 +2,8 @@
 
 A modern Valkey client for OCaml 5 + [Eio](https://github.com/ocaml-multicore/eio).
 
-**Status: alpha, approaching a stable API audit.** v0.3.1 is on
-opam. v0.4.0 is prepared as the Valkey Bundle module release:
+**Status: alpha, approaching a stable API audit.** v0.4.0 is on
+opam. It is the Valkey Bundle module release:
 Search, JSON, and Bloom now have typed wrappers, bundle-backed
 integration tests, and runnable examples. Full core + cluster +
 batch (incl. WATCH guards + cross-slot `pfcount_cluster`) +
@@ -49,6 +49,8 @@ No Lwt compat layer. No legacy Redis support.
   - [docs/blocking-pool.md](docs/blocking-pool.md) — per-node lease
     pool for `BLPOP` / `BRPOP` / `XREAD BLOCK` etc.; config knobs,
     typed errors, topology-change behaviour.
+  - [docs/observability.md](docs/observability.md) — OpenTelemetry
+    spans, cache and blocking-pool metrics, redaction rules.
   - [docs/tls.md](docs/tls.md) — system CAs, dev certs,
     observed overhead.
   - [docs/performance.md](docs/performance.md) — one-client model,
@@ -77,6 +79,8 @@ No Lwt compat layer. No legacy Redis support.
   silently dropped.
 - `?on_connected` hook — fires after every successful handshake
   (used by `Pubsub` to replay subscriptions).
+- OpenTelemetry spans for connect and cluster discovery / refresh,
+  plus cache and blocking-pool metrics (`Observability`).
 
 ### Cluster router
 
@@ -116,7 +120,7 @@ No Lwt compat layer. No legacy Redis support.
   (non-blocking + consumer groups + admin), scripting (with
   automatic `EVALSHA → EVAL` fallback on `NOSCRIPT`), blocking
   commands.
-- **Per-command default routing** (`Command_spec`): ~230 command
+- **Per-command default routing** (`Command_spec`): ~380 command
   + sub-command entries, cross-checked against live
   `COMMAND INFO` in a test.
 - **Cluster-aware admin**: `SCRIPT LOAD/FLUSH/EXISTS`, `KEYS`,
@@ -263,7 +267,7 @@ and `Client.spublish` (slot-pinned).
 - **Parser fuzzer** (`bin/fuzz_parser/`) — byte-level + tree
   mutation + length-field poisoning + shrinker. 10 M strict
   clean at ~145 k inputs/s.
-- **Stability fuzzer** (`bin/fuzz/`) — live-server soak with 48
+- **Stability fuzzer** (`bin/fuzz/`) — live-server soak with 49
   commands, optional docker-restart chaos, zero-error thresholds.
 - **Soak tool** (`bin/soak/`) — long-running stability with
   `Gc.quick_stat` + `/proc/self/fd` sampling + OLS slope
@@ -301,13 +305,13 @@ reference ceiling):
 
 | Scenario            |       Ours | ocaml-redis |        C | Ours/C | Ours/ocaml-redis |
 |---------------------|-----------:|------------:|---------:|-------:|-----------------:|
-| SET 100 B conc=1    |  7.3 k r/s |   8.5 k r/s |  8.8 k   |  83 %  |           0.86x  |
-| GET 100 B conc=100  |  199 k r/s |    60 k r/s |  202 k   |  99 %  |         **3.3x** |
+| SET 100 B conc=1    |  6.8 k r/s |   8.5 k r/s |  8.8 k   |  78 %  |           0.81x  |
+| GET 100 B conc=100  |  195 k r/s |    41 k r/s |  202 k   |  96 %  |         **4.7x** |
 | MIX 1 KiB conc=100  |  110 k r/s |    47 k r/s |    —     |   —    |         **2.3x** |
-| SET 16 KiB conc=10  |   49 k r/s |    26 k r/s |   55 k   |  91 %  |           1.9x   |
+| SET 16 KiB conc=10  |   50 k r/s |    26 k r/s |   55 k   |  91 %  |           1.9x   |
 
-At concurrency ≥ 10 we are **3–3.5× faster than ocaml-redis and
-within 85–96 % of the C reference**. Full matrix + methodology +
+At concurrency ≥ 10 we are **1.8–5.8× faster than ocaml-redis and
+within 77–101 % of the C reference**. Full matrix + methodology +
 optimisation history in [BENCHMARKS.md](BENCHMARKS.md). Run
 locally with `bash scripts/run-bench.sh`. Batch paths add a
 further ≈20× speedup vs per-key loops on 1000-key bulk operations

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- README: v0.4.0 is on opam, the benchmark table matches
+  `BENCHMARKS.md`, Command_spec and fuzzer counts match the code,
+  and the observability guide and OpenTelemetry support are listed.
+
 ## [0.4.0] — 2026-05-17
 
 ### Added
