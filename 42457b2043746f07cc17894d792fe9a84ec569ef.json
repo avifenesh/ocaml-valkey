@@ -1,0 +1,18 @@
+{
+  "conns": 1,
+  "tls": false,
+  "scenario_set": "core",
+  "scenarios": [
+    { "name": "SET               size=100     conc=1", "count": 5000, "ops_per_sec": 12036.62, "avg_ms": 0.083, "p50_ms": 0.078, "p90_ms": 0.095, "p99_ms": 0.123, "p999_ms": 0.191, "max_ms": 0.334 },
+    { "name": "GET               size=100     conc=1", "count": 5000, "ops_per_sec": 11734.72, "avg_ms": 0.085, "p50_ms": 0.078, "p90_ms": 0.098, "p99_ms": 0.168, "p999_ms": 0.472, "max_ms": 1.861 },
+    { "name": "SET               size=100     conc=10", "count": 5000, "ops_per_sec": 46274.52, "avg_ms": 0.216, "p50_ms": 0.206, "p90_ms": 0.284, "p99_ms": 0.384, "p999_ms": 0.451, "max_ms": 0.507 },
+    { "name": "GET               size=100     conc=10", "count": 5000, "ops_per_sec": 46338.32, "avg_ms": 0.216, "p50_ms": 0.205, "p90_ms": 0.280, "p99_ms": 0.376, "p999_ms": 0.461, "max_ms": 0.557 },
+    { "name": "MIX(80G/20S)      size=100     conc=10", "count": 5000, "ops_per_sec": 45673.37, "avg_ms": 0.219, "p50_ms": 0.208, "p90_ms": 0.289, "p99_ms": 0.374, "p999_ms": 0.505, "max_ms": 0.588 },
+    { "name": "SET               size=100     conc=100", "count": 5000, "ops_per_sec": 47670.35, "avg_ms": 2.086, "p50_ms": 2.074, "p90_ms": 2.822, "p99_ms": 3.292, "p999_ms": 3.372, "max_ms": 3.422 },
+    { "name": "GET               size=100     conc=100", "count": 5000, "ops_per_sec": 49064.34, "avg_ms": 2.024, "p50_ms": 2.080, "p90_ms": 2.573, "p99_ms": 3.148, "p999_ms": 3.323, "max_ms": 3.334 },
+    { "name": "MIX(80G/20S)      size=100     conc=100", "count": 5000, "ops_per_sec": 49313.54, "avg_ms": 2.011, "p50_ms": 2.058, "p90_ms": 2.662, "p99_ms": 3.073, "p999_ms": 3.175, "max_ms": 3.262 },
+    { "name": "SET               size=16384   conc=10", "count": 5000, "ops_per_sec": 32601.93, "avg_ms": 0.306, "p50_ms": 0.285, "p90_ms": 0.389, "p99_ms": 0.844, "p999_ms": 1.281, "max_ms": 1.384 },
+    { "name": "GET               size=16384   conc=10", "count": 5000, "ops_per_sec": 26151.31, "avg_ms": 0.382, "p50_ms": 0.337, "p90_ms": 0.612, "p99_ms": 0.900, "p999_ms": 0.972, "max_ms": 1.001 },
+    { "name": "MIX(80G/20S)      size=1024    conc=100", "count": 5000, "ops_per_sec": 37295.63, "avg_ms": 2.652, "p50_ms": 2.683, "p90_ms": 3.414, "p99_ms": 3.854, "p999_ms": 4.115, "max_ms": 4.371 }
+  ]
+}
