@@ -434,6 +434,25 @@ let force_failover_for_slot env ~slot =
         Valkey.Connection.request
           conn [| "CLUSTER"; "FAILOVER"; "FORCE" |]
       in
+      (* FAILOVER FORCE replies OK before the promotion. Wait until
+         the replica reports itself as master; otherwise the caller
+         can still reach the old primary on a warm pooled lease and
+         observe no failover at all. *)
+      let deadline = Eio.Time.now clock +. 10.0 in
+      let rec wait_promoted () =
+        match Valkey.Connection.request ~timeout:1.0 conn [| "ROLE" |] with
+        | Ok (Valkey.Resp3.Array (Valkey.Resp3.Bulk_string "master" :: _)) ->
+            ()
+        | _ when Eio.Time.now clock >= deadline ->
+            Valkey.Connection.close conn;
+            Alcotest.failf
+              "replica %s:%d not promoted within 10s of FAILOVER FORCE"
+              fo_host fo_port
+        | _ ->
+            Eio.Time.sleep clock 0.1;
+            wait_promoted ()
+      in
+      wait_promoted ();
       Valkey.Connection.close conn
 
 let with_cluster_client_refresh ?(pool = BP.Config.default)
